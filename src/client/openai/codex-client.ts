@@ -18,11 +18,27 @@ import type {
 } from 'openai/resources/responses/responses';
 
 const CODEX_API_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
-const CODEX_CLIENT_VERSION = '0.101.0';
+const CODEX_CLIENT_VERSION = '';
 const CODEX_USER_AGENT =
-  'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464';
-const CODEX_ORIGINATOR = 'codex_cli_rs';
+  'codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)';
+const CODEX_ORIGINATOR = 'codex-tui';
 const CODEX_RESPONSES_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
+const CODEX_COMMON_REQUEST_FIELDS_TO_DELETE = [
+  'prompt_cache_retention',
+  'safety_identifier',
+  'stream_options',
+] as const;
+
+type CodexResponseTool = NonNullable<ResponseCreateParamsBase['tools']>[number];
+type CodexImageGenerationTool = Extract<
+  CodexResponseTool,
+  { type: 'image_generation' }
+>;
+
+const CODEX_IMAGE_GENERATION_TOOL: CodexImageGenerationTool = {
+  type: 'image_generation',
+  output_format: 'png',
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -61,7 +77,92 @@ function resolveCodexWebSocketBaseUrl(baseUrl: string): string {
   return normalized;
 }
 
-function stripInputItemIdsFromWebSocketPayload(
+function shouldSkipCodexImageGenerationTool(model: unknown): boolean {
+  return typeof model === 'string' && model.endsWith('spark');
+}
+
+function isImageGenerationTool(tool: CodexResponseTool): boolean {
+  return tool.type === 'image_generation';
+}
+
+function ensureCodexImageGenerationTool(
+  baseBody: ResponseCreateParamsBase,
+): void {
+  if (shouldSkipCodexImageGenerationTool(baseBody.model)) {
+    return;
+  }
+
+  if (!baseBody.tools) {
+    baseBody.tools = [CODEX_IMAGE_GENERATION_TOOL];
+    return;
+  }
+
+  if (baseBody.tools.some(isImageGenerationTool)) {
+    return;
+  }
+
+  baseBody.tools = [...baseBody.tools, CODEX_IMAGE_GENERATION_TOOL];
+}
+
+function ensureCodexImageGenerationToolRecord(
+  record: Record<string, unknown>,
+): void {
+  if (shouldSkipCodexImageGenerationTool(record['model'])) {
+    return;
+  }
+
+  const tools = record['tools'];
+  if (!Array.isArray(tools)) {
+    record['tools'] = [CODEX_IMAGE_GENERATION_TOOL];
+    return;
+  }
+
+  if (
+    tools.some((tool) => isRecord(tool) && tool['type'] === 'image_generation')
+  ) {
+    return;
+  }
+
+  record['tools'] = [...tools, CODEX_IMAGE_GENERATION_TOOL];
+}
+
+function stripInputItemIdsFromRecord(record: Record<string, unknown>): void {
+  const input = record['input'];
+  if (!Array.isArray(input)) {
+    return;
+  }
+
+  record['input'] = input.map((item) => {
+    if (!isRecord(item) || !Object.prototype.hasOwnProperty.call(item, 'id')) {
+      return item;
+    }
+
+    const { id: _id, ...rest } = item;
+    return rest;
+  });
+}
+
+function normalizeCodexRequestRecord(
+  record: Record<string, unknown>,
+  options: { deletePreviousResponseId: boolean },
+): void {
+  for (const field of CODEX_COMMON_REQUEST_FIELDS_TO_DELETE) {
+    delete record[field];
+  }
+
+  if (options.deletePreviousResponseId) {
+    delete record['previous_response_id'];
+  }
+
+  if (record['instructions'] === undefined || record['instructions'] === null) {
+    record['instructions'] = '';
+  }
+
+  stripInputItemIdsFromRecord(record);
+  ensureCodexImageGenerationToolRecord(record);
+}
+
+function normalizeCodexWebSocketPayload(
   payload: ResponsesClientEvent,
 ): ResponsesClientEvent {
   if (payload.type !== 'response.create') {
@@ -73,19 +174,7 @@ function stripInputItemIdsFromWebSocketPayload(
     return payload;
   }
 
-  const input = parsed['input'];
-  if (!Array.isArray(input)) {
-    return payload;
-  }
-
-  parsed['input'] = input.map((item) => {
-    if (!isRecord(item) || !Object.prototype.hasOwnProperty.call(item, 'id')) {
-      return item;
-    }
-
-    const { id: _id, ...rest } = item;
-    return rest;
-  });
+  normalizeCodexRequestRecord(parsed, { deletePreviousResponseId: false });
 
   return isResponsesClientEvent(parsed) ? parsed : payload;
 }
@@ -157,8 +246,12 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
     deleteHeaderVariants(headers, 'chatgpt-account-id');
 
     headers['User-Agent'] = CODEX_USER_AGENT;
-    headers['Session_id'] = sessionId;
+    if (CODEX_USER_AGENT.includes('Mac OS')) {
+      headers['Session_id'] = sessionId;
+    }
     headers['Version'] = CODEX_CLIENT_VERSION;
+    setHeaderIfMissing(headers, 'X-Codex-Turn-Metadata', '');
+    setHeaderIfMissing(headers, 'X-Client-Request-Id', '');
     headers['Connection'] = 'Keep-Alive';
 
     const auth = this.config.auth;
@@ -186,9 +279,13 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       modelConfig,
       messages,
     );
+    deleteHeaderVariants(headers, 'connection');
+    deleteHeaderVariants(headers, 'x-codex-turn-metadata');
+    deleteHeaderVariants(headers, 'x-client-request-id');
     setHeaderIfMissing(headers, 'x-codex-beta-features', '');
     setHeaderIfMissing(headers, 'x-codex-turn-state', '');
     setHeaderIfMissing(headers, 'x-codex-turn-metadata', '');
+    setHeaderIfMissing(headers, 'x-client-request-id', '');
     setHeaderIfMissing(headers, 'x-responsesapi-include-timing-metrics', '');
 
     const existingBeta = readStringHeader(headers, 'openai-beta');
@@ -198,6 +295,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       existingBeta && existingBeta.includes('responses_websockets=')
         ? existingBeta
         : CODEX_RESPONSES_WEBSOCKET_BETA;
+    deleteHeaderVariants(headers, 'user-agent');
 
     return headers;
   }
@@ -213,7 +311,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
   protected override transformWebSocketRequestPayload(
     payload: ResponsesClientEvent,
   ): ResponsesClientEvent {
-    return stripInputItemIdsFromWebSocketPayload(payload);
+    return normalizeCodexWebSocketPayload(payload);
   }
 
   protected override handleRequest(
@@ -225,6 +323,10 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       prompt_cache_key: sessionId,
       instructions: '',
     });
+    delete baseBody.prompt_cache_retention;
+    delete baseBody.safety_identifier;
+    delete baseBody.stream_options;
+    ensureCodexImageGenerationTool(baseBody);
   }
 
   protected override createClient(
@@ -260,7 +362,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
-      const nextInit = stripInputItemIds(init);
+      const nextInit = normalizeCodexHttpRequest(init);
       if (!nextInit) {
         return baseFetch(input, nextInit);
       }
@@ -346,7 +448,7 @@ function getHeaderValue(
   return undefined;
 }
 
-function stripInputItemIds(
+function normalizeCodexHttpRequest(
   init: RequestInit | undefined,
 ): RequestInit | undefined {
   if (!init) {
@@ -375,29 +477,11 @@ function stripInputItemIds(
     return init;
   }
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     return init;
   }
 
-  const record = parsed as Record<string, unknown>;
-  const input = record['input'];
-  if (!Array.isArray(input)) {
-    return init;
-  }
+  normalizeCodexRequestRecord(parsed, { deletePreviousResponseId: true });
 
-  const nextInput = input.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      return item;
-    }
-
-    const itemRecord = item as Record<string, unknown>;
-    if (!Object.prototype.hasOwnProperty.call(itemRecord, 'id')) {
-      return item;
-    }
-
-    const { id: _id, ...rest } = itemRecord;
-    return rest;
-  });
-
-  return { ...init, body: JSON.stringify({ ...record, input: nextInput }) };
+  return { ...init, body: JSON.stringify(parsed) };
 }
