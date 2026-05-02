@@ -1,5 +1,18 @@
 # Changelog
 
+## v6.9.0 - 2026-05-02
+
+### Features
+- add OpenCode Go providers to README (bffe64e, SmallMain)
+- add OpenCode Go providers to well-known provider list (598eac4, Japsterr)
+
+### Fixes
+- codex: reduce GPT-5.5 max input tokens to 272000 (6f49695, SmallMain)
+- codex: prune orphan function calls after compact (a934b1e, moss)
+- codex: improve reasoning summary display (bcc706b, moss)
+- update model list for Alibaba Cloud Model Studio providers (b82891c, SmallMain)
+- detect bad default revision error in commit history check (b8d5c96, SmallMain)
+
 ## v6.8.5 - 2026-04-28
 
 ### Fixes
