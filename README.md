@@ -701,6 +701,8 @@ The providers listed below support [One-Click Configuration](#one-click-configur
 | [OpenCode Zen (OpenAI Responses)](https://opencode.ai/)                                                       | <li>ReasoningContent                                            | [Details](#opencode-zen)   |
 | [OpenCode Zen (Anthropic Messages)](https://opencode.ai/)                                                     | <li>InterleavedThinking <li>FineGrainedToolStreaming            | [Details](#opencode-zen)   |
 | [OpenCode Zen (Gemini)](https://opencode.ai/)                                                                 |                                                                 | [Details](#opencode-zen)   |
+| [OpenCode Go (OpenAI Chat Completion)](https://opencode.ai/)                                                  | <li>ReasoningContent                                            | [Details](#opencode-go)    |
+| [OpenCode Go (Anthropic Messages)](https://opencode.ai/)                                                      | <li>InterleavedThinking <li>FineGrainedToolStreaming            | [Details](#opencode-go)    |
 | [Nvidia](https://build.nvidia.com/)                                                                           |                                                                 | [Details](#nvidia)         |
 | [Kilo Code](https://kilo.ai/)                                                                                 | <li>RawBaseUrl                                                  | [Details](#kilo-code)      |
 | [Alibaba Cloud Model Studio (China)](https://www.aliyun.com/product/bailian)                                  | <li>ThinkingParam3 <li>ReasoningContent                         |                            |

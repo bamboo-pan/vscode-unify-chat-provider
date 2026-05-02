@@ -701,6 +701,8 @@ vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>&auth=
 | [OpenCode Zen (OpenAI Responses)](https://opencode.ai/)                                   | <li>ReasoningContent                                            | [详情](#opencode-zen) |
 | [OpenCode Zen (Anthropic Messages)](https://opencode.ai/)                                 | <li>InterleavedThinking <li>FineGrainedToolStreaming            | [详情](#opencode-zen) |
 | [OpenCode Zen (Gemini)](https://opencode.ai/)                                             |                                                                 | [详情](#opencode-zen) |
+| [OpenCode Go (OpenAI Chat Completion)](https://opencode.ai/)                              | <li>ReasoningContent                                            | [详情](#opencode-go)  |
+| [OpenCode Go (Anthropic Messages)](https://opencode.ai/)                                  | <li>InterleavedThinking <li>FineGrainedToolStreaming            | [详情](#opencode-go)  |
 | [英伟达](https://build.nvidia.com/)                                                       |                                                                 | [详情](#英伟达)       |
 | [Kilo Code](https://kilo.ai/)                                                             | <li>RawBaseUrl                                                  | [详情](#kilo-code)    |
 | [阿里云百炼平台 (中国站)](https://www.aliyun.com/product/bailian)                         | <li>ThinkingParam3 <li>ReasoningContent                         |                       |
