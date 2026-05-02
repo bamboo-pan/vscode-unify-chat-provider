@@ -247,13 +247,7 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderConfig[] = [
     type: 'openai-chat-completion',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     authTypes: ['api-key'],
-    models: [
-      'qwen3-max-2026-01-23',
-      'qwen3.6-plus',
-      'qwen3.5-flash',
-      'qwen3-coder-plus',
-      'qwen3-coder-flash',
-    ],
+    models: ['qwen3.6-max-preview', 'qwen3.6-plus', 'qwen3.5-flash'],
   },
   {
     name: 'Alibaba Cloud Model Studio (Coding Plan)',
@@ -262,6 +256,7 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderConfig[] = [
     baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     authTypes: ['api-key'],
     models: [
+      'qwen3.6-plus',
       'qwen3.5-plus',
       'qwen3-max-2026-01-23',
       'qwen3-coder-next',
@@ -279,6 +274,7 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderConfig[] = [
     baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/apps/anthropic',
     authTypes: ['api-key'],
     models: [
+      'qwen3.6-plus',
       'qwen3.5-plus',
       'qwen3-max-2026-01-23',
       'qwen3-coder-next',
@@ -295,13 +291,7 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderConfig[] = [
     type: 'openai-chat-completion',
     baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     authTypes: ['api-key'],
-    models: [
-      'qwen3-max-2026-01-23',
-      'qwen3.6-plus',
-      'qwen3.5-flash',
-      'qwen3-coder-plus',
-      'qwen3-coder-flash',
-    ],
+    models: ['qwen3.6-max-preview', 'qwen3.6-plus', 'qwen3.5-flash'],
   },
   {
     name: 'Model Scope (API-Inference)',
