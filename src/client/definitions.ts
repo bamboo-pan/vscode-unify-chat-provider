@@ -12,6 +12,7 @@ import { OllamaProvider } from './ollama/client';
 import { OpenAIChatCompletionProvider } from './openai/chat-completion-client';
 import { OpenAICodexProvider } from './openai/codex-client';
 import { OpenAIResponsesProvider } from './openai/responses-client';
+import { XaiGrokBuildProvider } from './xai/grok-build-client';
 import { Feature } from './types';
 import { matchProvider, matchModelFamily } from './utils';
 
@@ -25,6 +26,7 @@ export type ProviderType =
   | 'github-copilot'
   | 'openai-chat-completion'
   | 'openai-codex'
+  | 'xai-grok-build'
   | 'openai-responses'
   | 'ollama';
 
@@ -106,6 +108,13 @@ export const PROVIDER_TYPES: Record<ProviderType, ProviderDefinition> = {
     category: 'Experimental',
     class: OpenAICodexProvider,
   },
+  'xai-grok-build': {
+    type: 'xai-grok-build',
+    label: t('xAI Grok Build'),
+    description: '/v1/responses',
+    category: 'Experimental',
+    class: XaiGrokBuildProvider,
+  },
 };
 
 /**
@@ -137,6 +146,16 @@ function modelFamilyIncludes(
   return getModelFamily(model).toLowerCase().includes(expected.toLowerCase());
 }
 
+function modelIdentityIncludes(
+  model: { id: string; family?: string },
+  expected: string,
+): boolean {
+  const normalizedExpected = expected.toLowerCase();
+  return [model.family, getBaseModelId(model.id)].some((value) =>
+    value?.toLowerCase().includes(normalizedExpected),
+  );
+}
+
 export enum FeatureId {
   /**
    * @see https://www.volcengine.com/docs/82379/1569618?lang=zh
@@ -152,6 +171,12 @@ export enum FeatureId {
    * @see https://platform.claude.com/docs/en/build-with-claude/extended-thinking#interleaved-thinking
    */
   AnthropicInterleavedThinking = 'anthropic_interleaved-thinking',
+  /**
+   * Adaptive thinking is always enabled and cannot be disabled.
+   *
+   * @see https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
+   */
+  AnthropicAlwaysOnAdaptiveThinking = 'anthropic_always-on-adaptive-thinking',
   /**
    * The `xhigh` effort level is currently documented for Claude Opus 4.7.
    *
@@ -195,6 +220,12 @@ export enum FeatureId {
    */
   OpenAIUseReasoningParam = 'openai_use-reasoning-param',
   /**
+   * Use OpenRouter Claude adaptive thinking with top-level `verbosity`.
+   *
+   * @see https://openrouter.ai/docs/cookbook/evaluate-and-optimize/model-migrations/claude-4-7
+   */
+  OpenRouterUseClaudeAdaptiveVerbosity = 'openrouter_use-claude-adaptive-verbosity',
+  /**
    * @see https://platform.xiaomimimo.com/#/docs/api/text-generation/openai-api
    * @see https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
    * @see https://www.volcengine.com/docs/82379/1569618?lang=zh
@@ -235,6 +266,12 @@ export enum FeatureId {
    * @see https://developers.openai.com/docs/guides/conversation-state
    */
   OpenAIUsePreviousResponseId = 'openai_use-previous-response-id',
+  /**
+   * Use Responses API remote context compaction.
+   *
+   * @see https://platform.openai.com/docs/guides/conversation-state#compaction-advanced
+   */
+  OpenAIUseResponsesContextManagement = 'openai_use-responses-context-management',
   /**
    * Enable VolcEngine / BytePlus context caching on OpenAI Responses API.
    */
@@ -307,12 +344,6 @@ export enum FeatureId {
    */
   OpenAIUseReasoningSplitParam = 'openai_use-reasoning-split-param',
   /**
-   * Use provider base URL as-is for OpenAI-compatible Chat Completion APIs.
-   *
-   * Useful for gateway-style endpoints whose base path is already fully routed.
-   */
-  OpenAIUseRawBaseUrl = 'openai_use-raw-base-url',
-  /**
    * @see https://ai.google.dev/gemini-api/docs/thinking?hl=zh-cn#levels-budgets
    */
   GeminiUseThinkingLevel = 'gemini_use-thinking-level',
@@ -330,6 +361,8 @@ export const FEATURES: Record<FeatureId, Feature> = {
   },
   [FeatureId.AnthropicInterleavedThinking]: {
     supportedFamilys: [
+      'claude-opus-4-8',
+      'claude-opus-4.8',
       'claude-opus-4-7',
       'claude-opus-4.7',
       'claude-opus-4-6',
@@ -346,8 +379,16 @@ export const FEATURES: Record<FeatureId, Feature> = {
       'claude-opus-4',
     ],
   },
+  [FeatureId.AnthropicAlwaysOnAdaptiveThinking]: {
+    supportedFamilys: ['claude-fable-5', 'claude-mythos-5'],
+  },
   [FeatureId.AnthropicXHighEffort]: {
-    supportedFamilys: ['claude-opus-4-7', 'claude-opus-4.7'],
+    supportedFamilys: [
+      'claude-opus-4-8',
+      'claude-opus-4.8',
+      'claude-opus-4-7',
+      'claude-opus-4.7',
+    ],
   },
   [FeatureId.AnthropicWebSearch]: {
     supportedFamilys: [
@@ -383,6 +424,8 @@ export const FEATURES: Record<FeatureId, Feature> = {
   },
   [FeatureId.AnthropicContext1M]: {
     supportedFamilys: [
+      'claude-opus-4-8',
+      'claude-opus-4.8',
       'claude-opus-4-7',
       'claude-opus-4.7',
       'claude-opus-4-6',
@@ -434,6 +477,9 @@ export const FEATURES: Record<FeatureId, Feature> = {
     supportedProviders: [
       'ark.cn-beijing.volces.com',
       'ark.ap-southeast.bytepluses.com',
+      'tokenhub.tencentmaas.com',
+      'tokenhub-intl.tencentmaas.com',
+      'api.lkeap.cloud.tencent.com',
       'router.huggingface.co',
       'qianfan.baidubce.com',
       'portal.qwen.ai',
@@ -453,6 +499,30 @@ export const FEATURES: Record<FeatureId, Feature> = {
   },
   [FeatureId.OpenAIUseReasoningParam]: {
     supportedProviders: ['openrouter.ai'],
+  },
+  [FeatureId.OpenRouterUseClaudeAdaptiveVerbosity]: {
+    customCheckers: [
+      (model, provider) =>
+        matchProvider(provider.baseUrl, 'openrouter.ai') &&
+        [
+          'claude-opus-4-8',
+          'claude-opus-4.8',
+          'claude-4-8-opus',
+          'claude-4.8-opus',
+          'claude-opus-4-7',
+          'claude-opus-4.7',
+          'claude-4-7-opus',
+          'claude-4.7-opus',
+          'claude-opus-4-6',
+          'claude-opus-4.6',
+          'claude-4-6-opus',
+          'claude-4.6-opus',
+          'claude-sonnet-4-6',
+          'claude-sonnet-4.6',
+          'claude-4-6-sonnet',
+          'claude-4.6-sonnet',
+        ].some((expected) => modelIdentityIncludes(model, expected)),
+    ],
   },
   [FeatureId.OpenAIUseReasoningDetails]: {
     supportedProviders: ['openrouter.ai', 'api.minimaxi.com', 'api.minimax.io'],
@@ -478,6 +548,9 @@ export const FEATURES: Record<FeatureId, Feature> = {
     supportedProviders: [
       'ark.cn-beijing.volces.com',
       'ark.ap-southeast.bytepluses.com',
+      'tokenhub.tencentmaas.com',
+      'tokenhub-intl.tencentmaas.com',
+      'api.lkeap.cloud.tencent.com',
       'api.deepseek.com',
       'api.xiaomimimo.com',
       'open.bigmodel.cn',
@@ -514,6 +587,9 @@ export const FEATURES: Record<FeatureId, Feature> = {
     supportedProviders: [
       'ark.cn-beijing.volces.com',
       'ark.ap-southeast.bytepluses.com',
+      'tokenhub.tencentmaas.com',
+      'tokenhub-intl.tencentmaas.com',
+      'api.lkeap.cloud.tencent.com',
       'api.synthetic.new',
     ],
     customCheckers: [
@@ -522,9 +598,7 @@ export const FEATURES: Record<FeatureId, Feature> = {
     ],
   },
   [FeatureId.OpenAIUseDeepSeekReasoningEffortParam]: {
-    customCheckers: [
-      (model) => modelFamilyIncludes(model, 'deepseek-v4'),
-    ],
+    customCheckers: [(model) => modelFamilyIncludes(model, 'deepseek-v4')],
   },
   [FeatureId.OpenAIStripIncludeParam]: {
     supportedProviders: [
@@ -533,6 +607,9 @@ export const FEATURES: Record<FeatureId, Feature> = {
     ],
   },
   [FeatureId.OpenAIUsePreviousResponseId]: {
+    supportedProviders: ['api.openai.com', 'chatgpt.com'],
+  },
+  [FeatureId.OpenAIUseResponsesContextManagement]: {
     supportedProviders: ['api.openai.com', 'chatgpt.com'],
   },
   [FeatureId.OpenAIUseVolcContextCaching]: {
@@ -621,6 +698,9 @@ export const FEATURES: Record<FeatureId, Feature> = {
     supportedProviders: [
       'ark.cn-beijing.volces.com',
       'ark.ap-southeast.bytepluses.com',
+      'tokenhub.tencentmaas.com',
+      'tokenhub-intl.tencentmaas.com',
+      'api.lkeap.cloud.tencent.com',
       'api.deepseek.com',
       'api.xiaomimimo.com',
       'open.bigmodel.cn',
@@ -666,14 +746,12 @@ export const FEATURES: Record<FeatureId, Feature> = {
         ]),
     ],
   },
-  [FeatureId.OpenAIUseRawBaseUrl]: {
-    supportedProviders: [
-      'api.kilo.ai/api/gateway',
-      'qianfan.baidubce.com/v2/coding',
-      'wanqing.streamlakeapi.com/api/gateway/v1/endpoints',
-    ],
-  },
   [FeatureId.GeminiUseThinkingLevel]: {
-    supportedFamilys: ['gemini-3-'],
+    supportedFamilys: [
+      'gemini-3-',
+      'gemma-4-',
+      'models/gemini-3-',
+      'models/gemma-4-',
+    ],
   },
 };

@@ -43,9 +43,22 @@ const OPENAI_CODEX_REASONING_EFFORTS = [
   'low',
 ] as const;
 const OPENAI_OSS_REASONING_EFFORTS = ['high', 'medium', 'low'] as const;
+const TENCENT_HY3_REASONING_EFFORTS = ['high', 'medium', 'low'] as const;
 const DEEPSEEK_V4_REASONING_EFFORTS = ['max', 'high', 'none'] as const;
+const NVIDIA_MINIMAX_REASONING_EFFORTS = [
+  'high',
+  'medium',
+  'low',
+  'minimal',
+] as const;
 const ANTHROPIC_OPUS_4_7_REASONING_EFFORTS = [
   'max',
+  'xhigh',
+  'high',
+  'medium',
+  'low',
+] as const;
+const ANTHROPIC_FABLE_5_REASONING_EFFORTS = [
   'xhigh',
   'high',
   'medium',
@@ -76,6 +89,7 @@ const GEMINI_2_5_FLASH_REASONING_BUDGETS = {
   medium: 8192,
   low: 1024,
 } as const;
+const GROK_4_3_REASONING_EFFORTS = ['high', 'medium', 'low', 'none'] as const;
 
 function doubaoReasoningEffort(
   defaultEffort: (typeof DOUBAO_REASONING_EFFORTS)[number] | 'auto',
@@ -450,6 +464,82 @@ const _WELL_KNOWN_MODELS = [
       toolCalling: false,
       imageInput: false,
     },
+  },
+  {
+    id: 'claude-fable-5',
+    name: 'Claude Fable 5',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'auto',
+      effort: 'high',
+      summary: 'auto',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+      editTools: 'multi-find-replace',
+    },
+    presetTemplates: [
+      withThinkingSummaryAuto(
+        anthropicAdaptiveReasoningEffort(
+          ANTHROPIC_FABLE_5_REASONING_EFFORTS,
+          'high',
+        ),
+      ),
+    ],
+  },
+  {
+    id: 'claude-mythos-5',
+    name: 'Claude Mythos 5',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'auto',
+      effort: 'high',
+      summary: 'auto',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+      editTools: 'multi-find-replace',
+    },
+    presetTemplates: [
+      withThinkingSummaryAuto(
+        anthropicAdaptiveReasoningEffort(
+          ANTHROPIC_FABLE_5_REASONING_EFFORTS,
+          'high',
+        ),
+      ),
+    ],
+  },
+  {
+    id: 'claude-opus-4-8',
+    overrides: ['claude-opus-4.8', 'claude-opus-4-8-thinking'],
+    name: 'Claude Opus 4.8',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'auto',
+      effort: 'max',
+      summary: 'auto',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+      editTools: 'multi-find-replace',
+    },
+    presetTemplates: [
+      withThinkingSummaryAuto(
+        anthropicAdaptiveReasoningEffort(
+          ANTHROPIC_OPUS_4_7_REASONING_EFFORTS,
+          'max',
+        ),
+      ),
+    ],
   },
   {
     id: 'claude-opus-4-7',
@@ -1571,6 +1661,22 @@ const _WELL_KNOWN_MODELS = [
     },
   },
   {
+    id: 'MiniMax-M3',
+    name: 'MiniMax-M3',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 102400,
+    stream: true,
+    thinking: {
+      type: 'auto',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+    temperature: 1.0,
+    presetTemplates: [thinkingMode({ default: 'auto' })],
+  },
+  {
     id: 'MiniMax-M2.7',
     overrides: [
       'minimax-m2.7-free',
@@ -1580,6 +1686,13 @@ const _WELL_KNOWN_MODELS = [
         config: {
           id: 'minimaxai/minimax-m2.7',
           maxOutputTokens: 32768,
+          thinking: {
+            type: 'enabled',
+            effort: 'high',
+          },
+          presetTemplates: [
+            openAiReasoningEffort(NVIDIA_MINIMAX_REASONING_EFFORTS, 'high'),
+          ],
         },
       },
       {
@@ -1641,6 +1754,13 @@ const _WELL_KNOWN_MODELS = [
         config: {
           id: 'minimaxai/minimax-m2.5',
           maxOutputTokens: 32768,
+          thinking: {
+            type: 'enabled',
+            effort: 'high',
+          },
+          presetTemplates: [
+            openAiReasoningEffort(NVIDIA_MINIMAX_REASONING_EFFORTS, 'high'),
+          ],
         },
       },
       {
@@ -1702,6 +1822,13 @@ const _WELL_KNOWN_MODELS = [
         config: {
           id: 'minimaxai/minimax-m2.1',
           maxOutputTokens: 32768,
+          thinking: {
+            type: 'enabled',
+            effort: 'high',
+          },
+          presetTemplates: [
+            openAiReasoningEffort(NVIDIA_MINIMAX_REASONING_EFFORTS, 'high'),
+          ],
         },
       },
       {
@@ -1755,6 +1882,13 @@ const _WELL_KNOWN_MODELS = [
         config: {
           id: 'minimaxai/minimax-m2',
           maxOutputTokens: 32768,
+          thinking: {
+            type: 'enabled',
+            effort: 'high',
+          },
+          presetTemplates: [
+            openAiReasoningEffort(NVIDIA_MINIMAX_REASONING_EFFORTS, 'high'),
+          ],
         },
       },
       {
@@ -2213,6 +2347,20 @@ const _WELL_KNOWN_MODELS = [
     temperature: 1.0,
   },
   {
+    id: 'kimi-k2.7-code',
+    name: 'Kimi K2.7 Code',
+    maxInputTokens: 256000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+  },
+  {
     id: 'kimi-k2.6',
     overrides: [
       {
@@ -2238,7 +2386,7 @@ const _WELL_KNOWN_MODELS = [
       },
     ],
     name: 'Kimi K2.6',
-    maxInputTokens: 262144,
+    maxInputTokens: 256000,
     maxOutputTokens: 128000,
     stream: true,
     thinking: {
@@ -2279,7 +2427,7 @@ const _WELL_KNOWN_MODELS = [
       },
     ],
     name: 'Kimi K2.5',
-    maxInputTokens: 262144,
+    maxInputTokens: 256000,
     maxOutputTokens: 128000,
     stream: true,
     thinking: {
@@ -2396,6 +2544,34 @@ const _WELL_KNOWN_MODELS = [
       imageInput: false,
     },
     temperature: 0.6,
+  },
+  {
+    id: 'qwen3.7-max',
+    name: 'Qwen3.7-Max',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 64000,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: false,
+    },
+  },
+  {
+    id: 'qwen3.7-plus',
+    name: 'Qwen3.7-Plus',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 64000,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
   },
   {
     id: 'qwen3.6-max-preview',
@@ -3551,6 +3727,20 @@ const _WELL_KNOWN_MODELS = [
     },
   },
   {
+    id: 'mimo-v2.5-pro-ultraspeed',
+    name: 'MiMo V2.5 Pro UltraSpeed',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: false,
+    },
+  },
+  {
     id: 'mimo-v2.5-pro',
     name: 'MiMo V2.5 Pro',
     maxInputTokens: 1000000,
@@ -4035,6 +4225,57 @@ const _WELL_KNOWN_MODELS = [
     },
   },
   {
+    id: 'composer-2.5',
+    overrides: [
+      {
+        matchers: ['api.x.ai'],
+        config: {
+          id: 'grok-composer-2.5-fast',
+        },
+      },
+    ],
+    name: 'Composer 2.5',
+    maxInputTokens: 200000,
+    maxOutputTokens: 128000,
+    stream: true,
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+  },
+  {
+    id: 'grok-build-0.1',
+    name: 'Grok Build 0.1',
+    maxInputTokens: 256000,
+    maxOutputTokens: 128000,
+    stream: true,
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+  },
+  {
+    id: 'grok-4.3',
+    name: 'Grok 4.3',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    stream: true,
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+    thinking: {
+      type: 'enabled',
+      effort: 'high',
+    },
+    presetTemplates: [
+      reasoningEffort({
+        supported: GROK_4_3_REASONING_EFFORTS,
+        default: 'high',
+      }),
+    ],
+  },
+  {
     id: 'grok-4.20-0309-reasoning',
     name: 'Grok 4.20 0309 (Reasoning)',
     overrides: [
@@ -4168,9 +4409,30 @@ const _WELL_KNOWN_MODELS = [
     },
   },
   {
+    id: 'gemini-3.5-flash',
+    overrides: ['models/gemini-3.5-flash'],
+    name: 'Gemini 3.5 Flash',
+    maxInputTokens: 1048576,
+    maxOutputTokens: 65535,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+      effort: 'medium',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: true,
+    },
+    presetTemplates: [
+      geminiReasoningEffort(GEMINI_3_FLASH_REASONING_EFFORTS, 'medium'),
+    ],
+  },
+  {
     id: 'gemini-3.1-pro-preview',
     overrides: [
+      'models/gemini-3.1-pro-preview',
       'gemini-3.1-pro',
+      'models/gemini-3.1-pro',
       'gemini-3.1-pro-preview-customtools',
       {
         matchers: ['api.cline.bot'],
@@ -4198,7 +4460,9 @@ const _WELL_KNOWN_MODELS = [
   {
     id: 'gemini-3.1-flash-lite-preview',
     overrides: [
+      'models/gemini-3.1-flash-lite-preview',
       'gemini-3.1-flash-lite',
+      'models/gemini-3.1-flash-lite',
       {
         matchers: ['api.cline.bot'],
         config: {
@@ -4224,7 +4488,11 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-3-pro-preview',
-    overrides: ['gemini-3-pro'],
+    overrides: [
+      'models/gemini-3-pro-preview',
+      'gemini-3-pro',
+      'models/gemini-3-pro',
+    ],
     name: 'Gemini 3 Pro Preview',
     maxInputTokens: 1048576,
     maxOutputTokens: 65535,
@@ -4244,7 +4512,9 @@ const _WELL_KNOWN_MODELS = [
   {
     id: 'gemini-3-flash-preview',
     overrides: [
+      'models/gemini-3-flash-preview',
       'gemini-3-flash',
+      'models/gemini-3-flash',
       {
         matchers: ['api.cline.bot'],
         config: {
@@ -4270,6 +4540,7 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-2.5-pro',
+    overrides: ['models/gemini-2.5-pro'],
     name: 'Gemini 2.5 Pro',
     maxInputTokens: 1048576,
     maxOutputTokens: 65536,
@@ -4287,6 +4558,7 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-2.5-flash',
+    overrides: ['models/gemini-2.5-flash'],
     name: 'Gemini 2.5 Flash',
     maxInputTokens: 1048576,
     maxOutputTokens: 65536,
@@ -4306,6 +4578,7 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-2.5-flash-lite',
+    overrides: ['models/gemini-2.5-flash-lite'],
     name: 'Gemini 2.5 Flash-Lite',
     maxInputTokens: 1048576,
     maxOutputTokens: 65536,
@@ -4326,7 +4599,13 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-2.0-flash',
-    overrides: ['gemini-2.0-flash-001', 'gemini-2.0-flash-exp'],
+    overrides: [
+      'models/gemini-2.0-flash',
+      'gemini-2.0-flash-001',
+      'models/gemini-2.0-flash-001',
+      'gemini-2.0-flash-exp',
+      'models/gemini-2.0-flash-exp',
+    ],
     name: 'Gemini 2.0 Flash',
     maxInputTokens: 1048576,
     maxOutputTokens: 8192,
@@ -4338,7 +4617,11 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemini-2.0-flash-lite',
-    overrides: ['gemini-2.0-flash-lite-001'],
+    overrides: [
+      'models/gemini-2.0-flash-lite',
+      'gemini-2.0-flash-lite-001',
+      'models/gemini-2.0-flash-lite-001',
+    ],
     name: 'Gemini 2.0 Flash-Lite',
     maxInputTokens: 1048576,
     maxOutputTokens: 8192,
@@ -4350,12 +4633,13 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemma-4-31b-it',
-    overrides: ['gemma-4-31b'],
+    overrides: ['models/gemma-4-31b-it', 'gemma-4-31b', 'models/gemma-4-31b'],
     name: 'Gemma 4 31B',
     maxInputTokens: 256000,
     stream: true,
     thinking: {
       type: 'enabled',
+      effort: 'high',
     },
     capabilities: {
       toolCalling: true,
@@ -4365,12 +4649,17 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemma-4-26b-a4b-it',
-    overrides: ['gemma-4-26b-a4b'],
+    overrides: [
+      'models/gemma-4-26b-a4b-it',
+      'gemma-4-26b-a4b',
+      'models/gemma-4-26b-a4b',
+    ],
     name: 'Gemma 4 26B A4B',
     maxInputTokens: 256000,
     stream: true,
     thinking: {
       type: 'enabled',
+      effort: 'high',
     },
     capabilities: {
       toolCalling: true,
@@ -4380,12 +4669,13 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemma-4-e4b-it',
-    overrides: ['gemma-4-e4b'],
+    overrides: ['models/gemma-4-e4b-it', 'gemma-4-e4b', 'models/gemma-4-e4b'],
     name: 'Gemma 4 E4B',
     maxInputTokens: 128000,
     stream: true,
     thinking: {
       type: 'enabled',
+      effort: 'high',
     },
     capabilities: {
       toolCalling: true,
@@ -4395,18 +4685,37 @@ const _WELL_KNOWN_MODELS = [
   },
   {
     id: 'gemma-4-e2b-it',
-    overrides: ['gemma-4-e2b'],
+    overrides: ['models/gemma-4-e2b-it', 'gemma-4-e2b', 'models/gemma-4-e2b'],
     name: 'Gemma 4 E2B',
     maxInputTokens: 128000,
     stream: true,
     thinking: {
       type: 'enabled',
+      effort: 'high',
     },
     capabilities: {
       toolCalling: true,
       imageInput: true,
     },
     presetTemplates: [thinkingMode()],
+  },
+  {
+    id: 'hy3-preview',
+    name: 'Hy3 Preview',
+    maxInputTokens: 256000,
+    maxOutputTokens: 128000,
+    stream: true,
+    thinking: {
+      type: 'enabled',
+      effort: 'high',
+    },
+    capabilities: {
+      toolCalling: true,
+      imageInput: false,
+    },
+    presetTemplates: [
+      openAiReasoningEffort(TENCENT_HY3_REASONING_EFFORTS, 'high'),
+    ],
   },
   {
     id: 'hunyuan-2.0-thinking-20251109',

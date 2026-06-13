@@ -23,6 +23,8 @@ import {
   isCacheControlMarker,
   isImageMarker,
   isInternalMarker,
+  isRawBaseUrlEnabled,
+  isUsageMarker,
   normalizeImageMimeType,
   resolveContextCacheConfig,
   resolveChatNetwork,
@@ -38,6 +40,7 @@ import {
   buildBaseUrl,
   createCustomFetch,
   createFirstTokenRecorder,
+  createCopilotUsage,
   estimateTokenCount as sharedEstimateTokenCount,
   getToken,
   getTokenType,
@@ -55,6 +58,7 @@ import {
   EasyInputMessage,
   FunctionTool,
   Response as OpenAIResponse,
+  ResponseCompactionItemParam,
   ResponseCreateParamsBase,
   ResponsesClientEvent,
   ResponseFunctionCallOutputItem,
@@ -70,7 +74,7 @@ import {
 } from 'openai/resources/responses/responses';
 import { getBaseModelId } from '../../model-id-utils';
 import { createHash, randomUUID } from 'crypto';
-import { ProviderConfig, ModelConfig, PerformanceTrace } from '../../types';
+import { ChatRequestTrace, ProviderConfig, ModelConfig } from '../../types';
 import {
   WebSocketSessionError,
   WebSocketSessionRequest,
@@ -90,6 +94,15 @@ const STREAM_READ_RETRYABLE_ERROR_CODES = new Set<string>([
 ]);
 const WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE =
   'websocket_connection_limit_reached';
+const RESPONSES_CONTEXT_COMPACTION_FALLBACK_THRESHOLD = 50_000;
+const RESPONSES_CONTEXT_COMPACTION_THRESHOLD_RATIO = 0.9;
+const RESPONSES_CONTEXT_MANAGEMENT_EXCLUDED_BASE_MODELS = new Set([
+  'gpt-5',
+  'gpt-5.1',
+  'gpt-5.2',
+]);
+const RESPONSES_CONTEXT_COMPACTION_NOTICE =
+  '[Remote compaction has been triggered.]';
 
 type ResolvedTransportMode = 'sse' | 'auto' | 'websocket';
 
@@ -141,7 +154,7 @@ type OpenAIResponsesRequestContext = {
   abortController: AbortController;
   token: CancellationToken;
   logger: RequestLogger;
-  performanceTrace: PerformanceTrace;
+  requestTrace: ChatRequestTrace;
   expectedIdentity: string;
   credential: AuthTokenInfo;
   imageGenerationOutputMimeType: string;
@@ -163,6 +176,11 @@ type ResponsesApiTool = NonNullable<ResponseCreateParamsBase['tools']>[number];
 type ResponseImageGenerationTool = Extract<
   ResponsesApiTool,
   { type: 'image_generation' }
+>;
+
+type ResponseAdditionalToolsInputItem = Extract<
+  ResponseInputItem,
+  { type: 'additional_tools' }
 >;
 
 type OpenAIResponsesHttpRequestContext = OpenAIResponsesRequestContext & {
@@ -252,12 +270,40 @@ function isResponseImageGenerationTool(
   return tool.type === 'image_generation';
 }
 
-function normalizeMarkerOutputItem(item: ResponseOutputItem): ResponseInputItem {
+function normalizeMarkerOutputItem(
+  item: ResponseOutputItem,
+): ResponseInputItem {
   switch (item.type) {
+    case 'compaction': {
+      const inputItem: ResponseCompactionItemParam = {
+        encrypted_content: item.encrypted_content,
+        id: item.id,
+        type: item.type,
+      };
+      return inputItem;
+    }
+
     case 'computer_call_output':
       return {
         ...item,
         status: item.status === 'failed' ? 'incomplete' : item.status,
+      };
+
+    case 'additional_tools':
+      if (item.role === 'developer') {
+        const inputItem: ResponseAdditionalToolsInputItem = {
+          id: item.id,
+          role: item.role,
+          tools: item.tools,
+          type: item.type,
+        };
+        return inputItem;
+      }
+
+      return {
+        role: 'developer',
+        tools: item.tools,
+        type: item.type,
       };
 
     default:
@@ -346,6 +392,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
     return buildBaseUrl(config.baseUrl, {
       ensureSuffix: '/v1',
       skipSuffixIfMatch: /\/v\d+$/,
+      useRawBaseUrl: isRawBaseUrlEnabled(config),
     });
   }
 
@@ -394,6 +441,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
   ): OpenAI {
     const chatNetwork =
       mode === 'chat' ? resolveChatNetwork(this.config) : undefined;
+    const proxy = chatNetwork?.proxy ?? resolveChatNetwork(this.config).proxy;
     const effectiveTimeout =
       chatNetwork?.timeout ?? DEFAULT_NORMAL_TIMEOUT_CONFIG;
 
@@ -411,6 +459,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
         responseTimeoutMs: effectiveTimeout.response,
         logger,
         retryConfig: chatNetwork?.retry,
+        proxy,
         type: mode,
         abortSignal,
       }),
@@ -695,7 +744,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
       if (isCacheControlMarker(part)) {
         // ignore it, just use the officially recommended caching strategy.
         return undefined;
-      } else if (isInternalMarker(part)) {
+      } else if (isInternalMarker(part) || isUsageMarker(part)) {
         return undefined;
       } else if (isImageMarker(part)) {
         const mimeType = normalizeImageMimeType(part.mimeType);
@@ -820,10 +869,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
         const reasoning: NonNullable<ResponseCreateParamsBase['reasoning']> = {
           effort: this.normalizeReasoningEffortForOpenAi(thinking.effort),
         };
-        if (
-          thinking.summary !== undefined &&
-          thinking.summary !== 'none'
-        ) {
+        if (thinking.summary !== undefined && thinking.summary !== 'none') {
           reasoning.summary = thinking.summary;
         }
         return {
@@ -841,10 +887,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
         const reasoning: NonNullable<ResponseCreateParamsBase['reasoning']> = {
           effort: this.normalizeReasoningEffortForOpenAi(thinking.effort),
         };
-        if (
-          thinking.summary !== undefined &&
-          thinking.summary !== 'none'
-        ) {
+        if (thinking.summary !== undefined && thinking.summary !== 'none') {
           reasoning.summary = thinking.summary;
         }
         return {
@@ -891,6 +934,70 @@ export class OpenAIResponsesProvider implements ApiProvider {
     }
     const resolvedCache = resolveContextCacheConfig(this.config.contextCache);
     return resolvedCache.type === 'allow-paid';
+  }
+
+  protected shouldEnableResponsesContextManagement(
+    model: ModelConfig,
+  ): boolean {
+    if (!this.isResponsesContextManagementModelSupported(model)) {
+      return false;
+    }
+
+    return isFeatureSupported(
+      FeatureId.OpenAIUseResponsesContextManagement,
+      this.config,
+      model,
+    );
+  }
+
+  protected isResponsesContextManagementModelSupported(
+    model: ModelConfig,
+  ): boolean {
+    const baseModelId = getBaseModelId(model.id).toLowerCase();
+    return !RESPONSES_CONTEXT_MANAGEMENT_EXCLUDED_BASE_MODELS.has(baseModelId);
+  }
+
+  private resolveResponsesContextCompactionThreshold(
+    model: ModelConfig,
+  ): number | undefined {
+    if (!this.shouldEnableResponsesContextManagement(model)) {
+      return undefined;
+    }
+
+    if (
+      typeof model.maxInputTokens === 'number' &&
+      Number.isFinite(model.maxInputTokens) &&
+      model.maxInputTokens > 0
+    ) {
+      return Math.floor(
+        model.maxInputTokens * RESPONSES_CONTEXT_COMPACTION_THRESHOLD_RATIO,
+      );
+    }
+
+    return RESPONSES_CONTEXT_COMPACTION_FALLBACK_THRESHOLD;
+  }
+
+  private applyResponsesContextManagement(
+    model: ModelConfig,
+    baseBody: ResponseCreateParamsBase,
+  ): boolean {
+    if (baseBody.context_management !== undefined) {
+      return false;
+    }
+
+    const compactThreshold =
+      this.resolveResponsesContextCompactionThreshold(model);
+    if (compactThreshold === undefined) {
+      return false;
+    }
+
+    baseBody.context_management = [
+      {
+        type: 'compaction',
+        compact_threshold: compactThreshold,
+      },
+    ];
+    return true;
   }
 
   private applyVolcContextCaching(
@@ -1400,7 +1507,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
     model: ModelConfig,
     messages: readonly LanguageModelChatRequestMessage[],
     options: ProvideLanguageModelChatResponseOptions,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     token: CancellationToken,
     logger: RequestLogger,
     credential: AuthTokenInfo,
@@ -1489,6 +1596,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
         : { include: ['reasoning.encrypted_content'] }),
     };
 
+    this.applyResponsesContextManagement(model, baseBody);
     this.handleRequest(sessionId, baseBody);
 
     Object.assign(baseBody, this.config.extraBody, model.extraBody);
@@ -1537,11 +1645,12 @@ export class OpenAIResponsesProvider implements ApiProvider {
       abortController,
       token,
       logger,
-      performanceTrace,
+      requestTrace,
       expectedIdentity,
       credential,
-      imageGenerationOutputMimeType:
-        this.resolveImageGenerationOutputMimeType(baseBody.tools),
+      imageGenerationOutputMimeType: this.resolveImageGenerationOutputMimeType(
+        baseBody.tools,
+      ),
     };
     const httpContext: OpenAIResponsesHttpRequestContext = {
       ...baseContext,
@@ -1549,7 +1658,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
       includeResponseIdInMarker: httpIncludeResponseIdInMarker,
     };
 
-    performanceTrace.ttf = Date.now() - performanceTrace.tts;
+    requestTrace.performance.ttf = Date.now() - requestTrace.performance.tts;
     logger.verbose(
       `OpenAI Responses transport selected | configured=${this.config.transport ?? 'default'} | effective=${transportMode} | stream=${streamEnabled ? 'true' : 'false'} | session=${sessionId} | previousResponseId=${previousResponseId ? 'present' : 'absent'} | store=${baseBody.store === false ? 'false' : 'default/true'} | websocketCapability=${this.websocketCapability}`,
     );
@@ -1648,7 +1757,8 @@ export class OpenAIResponsesProvider implements ApiProvider {
     while (true) {
       attempt += 1;
       this.prepareStreamReadRetryAttempt(retryState);
-      context.performanceTrace.ttf = Date.now() - context.performanceTrace.tts;
+      context.requestTrace.performance.ttf =
+        Date.now() - context.requestTrace.performance.tts;
       const requestBody = this.buildRequestBodyForAttempt(
         context.baseBody,
         context.fullInput,
@@ -1676,13 +1786,14 @@ export class OpenAIResponsesProvider implements ApiProvider {
             stream,
             responseTimeoutMs,
             context.abortController.signal,
+            (error) => context.abortController.abort(error),
           );
           for await (const part of this.parseMessageStream(
             timedStream,
             context.sessionId,
             context.token,
             context.logger,
-            context.performanceTrace,
+            context.requestTrace,
             context.expectedIdentity,
             context.includeResponseIdInMarker,
             context.streamEnabled ? 'sse' : 'http',
@@ -1707,7 +1818,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
           for await (const part of this.parseMessage(
             data,
             context.sessionId,
-            context.performanceTrace,
+            context.requestTrace,
             context.logger,
             context.expectedIdentity,
             context.includeResponseIdInMarker,
@@ -1783,7 +1894,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
           for await (const part of this.parseMessage(
             data,
             context.sessionId,
-            context.performanceTrace,
+            context.requestTrace,
             context.logger,
             context.expectedIdentity,
             context.includeResponseIdInMarker,
@@ -1836,7 +1947,8 @@ export class OpenAIResponsesProvider implements ApiProvider {
 
     while (true) {
       attempt += 1;
-      context.performanceTrace.ttf = Date.now() - context.performanceTrace.tts;
+      context.requestTrace.performance.ttf =
+        Date.now() - context.requestTrace.performance.tts;
       let request: WebSocketSessionRequest<ResponseStreamEvent> | undefined;
       let responseEstablished = false;
 
@@ -1902,7 +2014,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
           context.sessionId,
           context.token,
           context.logger,
-          context.performanceTrace,
+          context.requestTrace,
           context.expectedIdentity,
           context.includeResponseIdInMarker,
           'websocket',
@@ -1992,13 +2104,14 @@ export class OpenAIResponsesProvider implements ApiProvider {
   private async *parseMessage(
     message: OpenAIResponse,
     sessionId: string,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
     expectedIdentity: string,
     includeResponseIdInMarker: boolean,
     transportLabel: 'http' | 'sse' | 'websocket',
     imageGenerationOutputMimeType: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     // NOTE: The current behavior of VSCode is such that all Parts returned here will be
     // aggregated into a single Part during the next request, and only the Thinking part
     // will be retained during the tool invocation round; most other types of Parts
@@ -2016,6 +2129,40 @@ export class OpenAIResponsesProvider implements ApiProvider {
     performanceTrace.ttft =
       Date.now() - (performanceTrace.tts + performanceTrace.ttf);
 
+    // Mirror the streaming `response.failed` / `response.incomplete`
+    // handling so abnormal terminal states surface as errors instead of
+    // silently empty/truncated responses.
+    if (message.status === 'failed') {
+      if (message.error) {
+        const responseError = this.extractResponseError(message.error);
+        throw new OpenAIResponsesRequestError(
+          `OpenAI Response Failed: ${responseError.message}${
+            responseError.code ? ` (${responseError.code})` : ''
+          }`,
+          {
+            source: 'generic',
+            code: responseError.code,
+            type: responseError.type,
+            param: responseError.param,
+            status: responseError.status,
+          },
+        );
+      }
+      throw new OpenAIResponsesRequestError(
+        'OpenAI Response Failed: unknown error',
+        { source: 'generic' },
+      );
+    }
+
+    if (message.status === 'incomplete') {
+      throw new OpenAIResponsesRequestError(
+        `OpenAI Response Incomplete: ${
+          message.incomplete_details?.reason || 'unknown reason'
+        }`,
+        { source: 'generic' },
+      );
+    }
+
     const reasonings = message.output.filter(
       (v): v is ResponseReasoningItem => v.type === 'reasoning',
     );
@@ -2026,6 +2173,12 @@ export class OpenAIResponsesProvider implements ApiProvider {
       switch (item.type) {
         case 'reasoning':
           // hadnle it already.
+          break;
+
+        case 'compaction':
+          yield new vscode.LanguageModelTextPart(
+            RESPONSES_CONTEXT_COMPACTION_NOTICE,
+          );
           break;
 
         case 'message':
@@ -2082,7 +2235,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
     );
 
     if (message.usage) {
-      this.processUsage(message.usage, performanceTrace, logger);
+      this.processUsage(message.usage, requestTrace, logger);
     }
   }
 
@@ -2231,7 +2384,9 @@ export class OpenAIResponsesProvider implements ApiProvider {
     completedOutputItems: ReadonlyMap<number, ResponseOutputItem>,
     logger: RequestLogger,
   ): ResponseOutputItem[] {
-    const responseOutput = response.output.slice();
+    const responseOutput = Array.isArray(response.output)
+      ? response.output.slice()
+      : [];
     if (
       responseOutput.length === 0 &&
       addedOutputItems.size === 0 &&
@@ -2278,12 +2433,13 @@ export class OpenAIResponsesProvider implements ApiProvider {
     sessionId: string,
     token: vscode.CancellationToken,
     logger: RequestLogger,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     expectedIdentity: string,
     includeResponseIdInMarker: boolean,
     transportLabel: 'http' | 'sse' | 'websocket',
     imageGenerationOutputMimeType: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     let usage: ResponseUsage | undefined;
     const emittedFunctionCallIds = new Set<string>();
     const addedOutputItems = new Map<number, ResponseOutputItem>();
@@ -2408,6 +2564,13 @@ export class OpenAIResponsesProvider implements ApiProvider {
               continue;
             }
 
+            if (item.type === 'compaction') {
+              yield new vscode.LanguageModelTextPart(
+                RESPONSES_CONTEXT_COMPACTION_NOTICE,
+              );
+              continue;
+            }
+
             if (isResponseImageGenerationCall(item)) {
               const imagePart = this.emitImageGenerationCallPart(
                 item,
@@ -2496,16 +2659,21 @@ export class OpenAIResponsesProvider implements ApiProvider {
     }
 
     if (usage) {
-      this.processUsage(usage, performanceTrace, logger);
+      this.processUsage(usage, requestTrace, logger);
     }
   }
 
   private processUsage(
     usage: ResponseUsage,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
   ) {
-    sharedProcessUsage(usage.output_tokens, performanceTrace, logger, usage);
+    const normalizedUsage = createCopilotUsage(
+      usage.input_tokens,
+      usage.output_tokens,
+      usage.input_tokens_details.cached_tokens,
+    );
+    sharedProcessUsage(requestTrace, logger, normalizedUsage);
   }
 
   estimateTokenCount(text: string): number {

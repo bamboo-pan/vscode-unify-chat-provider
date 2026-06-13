@@ -1,5 +1,126 @@
 # Changelog
 
+## v7.4.2 - 2026-06-12
+
+### Fixes
+- remove max tokens config from Grok Composer 2.5 Fast (d4db31f, SmallMain)
+
+## v7.4.1 - 2026-06-12
+
+### Fixes
+- remove thinking effort from Grok Build 0.1 and Composer 2.5 models (1d3b127, SmallMain)
+- settings.json add xAI Grok Build provider support (09eb8cd, SmallMain)
+
+## v7.4.0 - 2026-06-12
+
+### Features
+- add Grok 4.3, Grok Build 0.1, and Composer 2.5 models (bfdf459, SmallMain)
+
+## v7.3.0 - 2026-06-12
+
+### Features
+- add Kimi K2.7 Code model (2a18e04, SmallMain)
+- rename xAI Grok OAuth to xAI Grok Build and update related definitions and documentation (9655e29, SmallMain)
+- add xAI Grok OAuth (SuperGrok / X Premium+) support (d6a86d9, m1n)
+
+### Fixes
+- xai-grok-oauth: document required 127.0.0.1 redirect and improve bare code / fragment parsing (07df60a, m1n)
+
+## v7.2.2 - 2026-06-12
+
+### Fixes
+- update Claude Code client to support JSON metadata format and fix Antigravity/Gemini CLI user agent/scopes (f16b387, SmallMain)
+
+## v7.2.1 - 2026-06-11
+
+### Features
+- add "Generate All Changes" command option in README (4e275be, SmallMain)
+- add 'Generate All Changes' command and auto-scope for commit messages (6a21ab5, SmallMain)
+- surface abnormal stop reasons as errors across providers (bcc9067, SmallMain)
+
+### Other
+- Support New API quota transform (5981281, 董艺宽)
+
+## v7.2.0 - 2026-06-11
+
+### Features
+- support OpenAI Responses API context management and sync experimental clients with latest API changes (0ed7a49, SmallMain)
+- sync GitHub Copilot client with latest API changes (523f7b8, SmallMain)
+- sync experimental clients to latest versions (24430db, SmallMain)
+- add thinking effort for NVIDIA MiniMax M2 models (8d9aa12, SmallMain)
+
+### Fixes
+- sync base URL resolution logic (1c99419, SmallMain)
+- sync experimental clients with latest changes (562c809, SmallMain)
+
+## v7.1.2 - 2026-06-10
+
+### Features
+- add Tencent Cloud TokenHub, revamp Alibaba providers, add new models (d4637be, SmallMain)
+
+### Fixes
+- rename thinking mode options to 'Thinking' and 'Non-Thinking' (c4fcb67, SmallMain)
+- update Gemini model aliases and enable Gemma 4 thinking effort (14008b8, SmallMain)
+
+## v7.1.1 - 2026-06-10
+
+### Fixes
+- add retry for stream read errors in chat streaming (de2b7db, SmallMain)
+- improve cancellation and response body lifecycle handling (0164749, SmallMain)
+- disable default image generation tool for Codex and add token count fallback (28e12a1, SmallMain)
+- Ahthropic thinking config handling for effort and budget tokens (59a7d65, SmallMain)
+
+## v7.1.0 - 2026-06-10
+
+### Features
+- add global and per-provider proxy configuration (224c835, SmallMain)
+- add SOCKS proxy support (7eca300, SmallMain)
+
+### Fixes
+- force remove 'max_output_tokens' from Codex client request fields (6510571, SmallMain)
+
+## v7.0.0 - 2026-06-10
+
+### Features
+- add useRawBaseUrl option to disable automatic URL normalization (f1261a2, SmallMain)
+- add config option to display balance in model configuration (173bd8f, SmallMain)
+- add pricing to model selection items (060d36f, SmallMain)
+- add configurable retry status codes (d815cc4, SmallMain)
+
+## v6.10.0 - 2026-06-09
+
+### Features
+- propagate and emit normalized token usage for Copilot (8ab8586, SmallMain)
+- extract isRetryableNetworkError to utils and add stream retry for Google Code Assist (aa4115e, SmallMain)
+- add functions for normalizing tool schema values and handling schema keys (16b9622, ZheFox)
+- add Claude Fast mode support (10e0615, SmallMain)
+- add conditional provider suffix for duplicate names (312f186, SmallMain)
+- use model configuration to determine default preset template (5d9367c, SmallMain)
+- add Claude Opus 4.8 model (3cef3c3, SmallMain)
+- openai: add OpenRouter Claude adaptive verbosity support (83ab62f, SmallMain)
+- enable agents window support on extension activation (0a7681d, SmallMain)
+
+### Fixes
+- normalize `additional_tools` output items and fix WebSocket readyState access (7930977, SmallMain)
+
+### Refactors
+- remove context indicator display fix (4fe9618, SmallMain)
+- remove provider category from model configuration (1792cc1, SmallMain)
+
+### Chores
+- update README.md (e807b35, SmallMain)
+- deps: update @anthropic-ai/sdk, @google/genai, openai, and ws dependencies (bb0aa01, SmallMain)
+- add "language-models" to VS Code keywords (e038546, SmallMain)
+- update dts files (2b040e4, SmallMain)
+
+## v6.9.3 - 2026-05-27
+
+### Fixes
+- handle non-array output in OpenAI responses gracefully (1e60445, SmallMain)
+
+### Chores
+- add VS Code Marketplace retry and detect already-published version (7ba4c5d, SmallMain)
+
 ## v6.9.2 - 2026-05-10
 
 ### Refactors

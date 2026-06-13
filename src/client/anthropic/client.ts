@@ -27,6 +27,8 @@ import {
   isCacheControlMarker,
   isImageMarker,
   isInternalMarker,
+  isRawBaseUrlEnabled,
+  isUsageMarker,
   encodeStatefulMarkerPart,
   decodeStatefulMarkerPart,
   normalizeImageMimeType,
@@ -39,7 +41,7 @@ import {
 } from '../../utils';
 import { getBaseModelId } from '../../model-id-utils';
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../defaults';
-import { ModelConfig, PerformanceTrace, ProviderConfig } from '../../types';
+import { ChatRequestTrace, ModelConfig, ProviderConfig } from '../../types';
 import { TracksToolInput } from '@anthropic-ai/sdk/lib/BetaMessageStream';
 import {
   ENCRYPTED_THINKING_PLACEHOLDER,
@@ -47,13 +49,16 @@ import {
 } from '../types';
 import { FeatureId } from '../definitions';
 import {
+  AbnormalStopReasonError,
   buildBaseUrl,
   createCustomFetch,
   createFirstTokenRecorder,
+  createCopilotUsage,
   estimateTokenCount as sharedEstimateTokenCount,
   isFeatureSupported,
   mergeHeaders,
   parseToolArguments,
+  isAnthropicFastModeServiceTier,
   processUsage as sharedProcessUsage,
   resolveAnthropicServiceTier,
   getToken,
@@ -69,16 +74,38 @@ import type { AuthTokenInfo } from '../../auth/types';
 // TODO Context editing support
 type AnthropicThinkingContentType = 'content' | 'encrypted';
 type AnthropicThinkingDisplay = 'summarized' | 'omitted';
+type AnthropicThinkingRequestParam = 'budget_tokens' | 'effort';
+type AnthropicThinkingEffort = NonNullable<
+  NonNullable<ModelConfig['thinking']>['effort']
+>;
+type AnthropicEnabledThinkingEffort = Exclude<AnthropicThinkingEffort, 'none'>;
+type AnthropicOutputEffort = NonNullable<
+  NonNullable<MessageCreateParamsStreaming['output_config']>['effort']
+>;
 
 type AnthropicThinkingOutputState = {
   lastType?: AnthropicThinkingContentType;
 };
 
+/**
+ * Stop reasons that indicate the response did not complete normally and
+ * should surface as an error. Unknown values from third-party providers
+ * are intentionally not listed so they pass through.
+ */
+const ANTHROPIC_ABNORMAL_STOP_REASONS: ReadonlySet<string> = new Set([
+  'refusal',
+  'max_tokens',
+  'model_context_window_exceeded',
+]);
+
 export class AnthropicProvider implements ApiProvider {
   private readonly baseUrl: string;
 
   constructor(protected readonly config: ProviderConfig) {
-    this.baseUrl = buildBaseUrl(config.baseUrl, { stripPattern: /\/v1$/i });
+    this.baseUrl = buildBaseUrl(config.baseUrl, {
+      stripPattern: /\/v1$/i,
+      useRawBaseUrl: isRawBaseUrlEnabled(config),
+    });
   }
 
   protected toProviderToolName(name: string): string {
@@ -102,6 +129,7 @@ export class AnthropicProvider implements ApiProvider {
   ): Anthropic {
     const chatNetwork =
       mode === 'chat' ? resolveChatNetwork(this.config) : undefined;
+    const proxy = chatNetwork?.proxy ?? resolveChatNetwork(this.config).proxy;
     const effectiveTimeout =
       chatNetwork?.timeout ?? DEFAULT_NORMAL_TIMEOUT_CONFIG;
 
@@ -127,6 +155,7 @@ export class AnthropicProvider implements ApiProvider {
         responseTimeoutMs: effectiveTimeout.response,
         logger,
         retryConfig: chatNetwork?.retry,
+        proxy,
         type: mode,
         abortSignal,
       }),
@@ -139,7 +168,11 @@ export class AnthropicProvider implements ApiProvider {
   protected buildHeaders(
     credential?: AuthTokenInfo,
     modelConfig?: ModelConfig,
-    options?: { stream?: boolean },
+    options?: {
+      stream?: boolean;
+      messages?: readonly vscode.LanguageModelChatRequestMessage[];
+      requestState?: { userId?: string };
+    },
   ): Record<string, string | null> {
     const token = getToken(credential);
 
@@ -167,7 +200,28 @@ export class AnthropicProvider implements ApiProvider {
     anthropicInterleavedThinkingEnabled: boolean;
   }): void {}
 
+  protected shouldEnableFineGrainedToolStreaming(_options: {
+    model: ModelConfig;
+    stream: boolean;
+    toolCount: number;
+  }): boolean {
+    return true;
+  }
+
   protected transformRequestBase(
+    requestBase: Omit<MessageCreateParamsStreaming, 'stream'>,
+    _options: {
+      model: ModelConfig;
+      stream: boolean;
+      credential?: AuthTokenInfo;
+      historyUserId?: string;
+      requestState: { userId?: string };
+    },
+  ): Omit<MessageCreateParamsStreaming, 'stream'> {
+    return requestBase;
+  }
+
+  protected finalizeRequestBase(
     requestBase: Omit<MessageCreateParamsStreaming, 'stream'>,
     _options: {
       model: ModelConfig;
@@ -198,6 +252,69 @@ export class AnthropicProvider implements ApiProvider {
       default:
         return undefined;
     }
+  }
+
+  private resolveAnthropicThinkingRequestParam(
+    thinking: ModelConfig['thinking'] | undefined,
+    alwaysOnAdaptiveThinking: boolean,
+  ): AnthropicThinkingRequestParam | undefined {
+    if (thinking === undefined) {
+      return undefined;
+    }
+
+    if (alwaysOnAdaptiveThinking) {
+      return thinking.effort !== undefined || thinking.summary !== undefined
+        ? 'effort'
+        : undefined;
+    }
+
+    const hasBudgetTokens = thinking.budgetTokens !== undefined;
+    const hasEffort = thinking.effort !== undefined;
+
+    if (hasBudgetTokens !== hasEffort) {
+      return hasBudgetTokens ? 'budget_tokens' : 'effort';
+    }
+
+    switch (thinking.type) {
+      case 'enabled':
+        return 'budget_tokens';
+      case 'auto':
+        return 'effort';
+      case 'disabled':
+        return undefined;
+    }
+  }
+
+  private isAnthropicThinkingEnabled(
+    requestParam: AnthropicThinkingRequestParam | undefined,
+    thinking: ModelConfig['thinking'] | undefined,
+  ): boolean {
+    if (requestParam === undefined) {
+      return false;
+    }
+
+    return requestParam === 'budget_tokens' || thinking?.effort !== 'none';
+  }
+
+  private normalizeAnthropicOutputEffort(
+    effort: AnthropicEnabledThinkingEffort,
+    model: ModelConfig,
+  ): AnthropicOutputEffort {
+    if (effort === 'xhigh') {
+      return isFeatureSupported(
+        FeatureId.AnthropicXHighEffort,
+        this.config,
+        model,
+      )
+        ? 'xhigh'
+        : 'max';
+    }
+
+    if (effort === 'minimal') {
+      return 'low';
+    }
+
+    return effort;
   }
 
   /**
@@ -461,7 +578,7 @@ export class AnthropicProvider implements ApiProvider {
       if (isCacheControlMarker(part)) {
         // ignore it, just use the officially recommended caching strategy.
         return undefined;
-      } else if (isInternalMarker(part)) {
+      } else if (isInternalMarker(part) || isUsageMarker(part)) {
         return undefined;
       } else if (isImageMarker(part)) {
         if (role === vscode.LanguageModelChatMessageRole.System) {
@@ -712,11 +829,12 @@ export class AnthropicProvider implements ApiProvider {
     model: ModelConfig,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     options: vscode.ProvideLanguageModelChatResponseOptions,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     token: vscode.CancellationToken,
     logger: RequestLogger,
     credential: AuthTokenInfo,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     const abortController = new AbortController();
     const cancellationListener = token.onCancellationRequested(() => {
       abortController.abort();
@@ -735,9 +853,22 @@ export class AnthropicProvider implements ApiProvider {
         model.capabilities?.imageInput === true ? 'all' : 'discard',
     });
 
-    const thinkingType = model.thinking?.type;
+    const alwaysOnAdaptiveThinking = isFeatureSupported(
+      FeatureId.AnthropicAlwaysOnAdaptiveThinking,
+      this.config,
+      model,
+    );
+    const anthropicThinkingRequestParam =
+      this.resolveAnthropicThinkingRequestParam(
+        model.thinking,
+        alwaysOnAdaptiveThinking,
+      );
     const thinkingEnabled =
-      thinkingType === 'enabled' || thinkingType === 'auto';
+      alwaysOnAdaptiveThinking ||
+      this.isAnthropicThinkingEnabled(
+        anthropicThinkingRequestParam,
+        model.thinking,
+      );
     const thinkingDisplay = this.resolveThinkingDisplay(model, thinkingEnabled);
     const hasTools = (options.tools && options.tools.length > 0) ?? false;
     const stream = model.stream ?? true;
@@ -745,6 +876,7 @@ export class AnthropicProvider implements ApiProvider {
     const anthropicInterleavedThinkingEnabled =
       thinkingEnabled &&
       hasTools &&
+      !alwaysOnAdaptiveThinking &&
       isFeatureSupported(
         FeatureId.AnthropicInterleavedThinking,
         this.config,
@@ -775,6 +907,11 @@ export class AnthropicProvider implements ApiProvider {
     const fineGrainedToolStreamingEnabled =
       stream === true &&
       (tools?.length ?? 0) > 0 &&
+      this.shouldEnableFineGrainedToolStreaming({
+        model,
+        stream,
+        toolCount: tools?.length ?? 0,
+      }) &&
       isFeatureSupported(
         FeatureId.AnthropicFineGrainedToolStreaming,
         this.config,
@@ -815,14 +952,17 @@ export class AnthropicProvider implements ApiProvider {
       anthropicInterleavedThinkingEnabled,
     });
 
-    const headers = this.buildHeaders(credential, model, { stream });
-
     // Pass thinkingEnabled to convertToolChoice to enforce tool_choice restrictions
     const toolChoice = this.applyParallelToolChoice(
       this.convertToolChoice(options.toolMode, tools, thinkingEnabled),
       model.parallelToolCalling,
     );
     const serviceTier = resolveAnthropicServiceTier(this.config, model);
+    const fastModeEnabled = isAnthropicFastModeServiceTier(this.config, model);
+
+    if (fastModeEnabled) {
+      betaFeatures.add('fast-mode-2026-02-01');
+    }
 
     try {
       let requestBase: Omit<MessageCreateParamsStreaming, 'stream'> = {
@@ -830,9 +970,8 @@ export class AnthropicProvider implements ApiProvider {
         messages: anthropicMessages,
         max_tokens: model.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         ...(serviceTier !== undefined ? { service_tier: serviceTier } : {}),
+        ...(fastModeEnabled ? { speed: 'fast' } : {}),
       };
-
-      Object.assign(requestBase, this.config.extraBody, model.extraBody);
 
       if (system) {
         requestBase.system = system;
@@ -862,47 +1001,39 @@ export class AnthropicProvider implements ApiProvider {
       }
       if (model.thinking !== undefined) {
         const { budgetTokens, effort } = model.thinking;
-        if (thinkingType === 'enabled') {
-          // With interleaved thinking, budget_tokens can exceed max_tokens
-          // For regular thinking, it must be less than max_tokens
-          requestBase.thinking = {
-            type: 'enabled',
-            budget_tokens: this.normalizeThinkingBudget(
-              budgetTokens,
-              requestBase.max_tokens,
-              anthropicInterleavedThinkingEnabled,
-            ),
-            ...(thinkingDisplay ? { display: thinkingDisplay } : {}),
-          };
-        } else if (thinkingType === 'auto') {
-          requestBase.thinking = {
-            type: 'adaptive',
-            ...(thinkingDisplay ? { display: thinkingDisplay } : {}),
-          };
-          if (effort) {
-            requestBase.output_config ??= {};
-            if (effort === 'none') {
+        switch (anthropicThinkingRequestParam) {
+          case 'budget_tokens':
+            // With interleaved thinking, budget_tokens can exceed max_tokens.
+            // For regular thinking, it must be less than max_tokens.
+            requestBase.thinking = {
+              type: 'enabled',
+              budget_tokens: this.normalizeThinkingBudget(
+                budgetTokens,
+                requestBase.max_tokens,
+                anthropicInterleavedThinkingEnabled,
+              ),
+              ...(thinkingDisplay ? { display: thinkingDisplay } : {}),
+            };
+            break;
+          case 'effort':
+            if (effort === 'none' && !alwaysOnAdaptiveThinking) {
               requestBase.thinking = {
                 type: 'disabled',
               };
-            } else if (effort === 'xhigh') {
-              if (
-                isFeatureSupported(
-                  FeatureId.AnthropicXHighEffort,
-                  this.config,
-                  model,
-                )
-              ) {
-                requestBase.output_config.effort = 'xhigh';
-              } else {
-                requestBase.output_config.effort = 'max';
-              }
-            } else if (effort === 'minimal') {
-              requestBase.output_config.effort = 'low';
             } else {
-              requestBase.output_config.effort = effort;
+              if (!alwaysOnAdaptiveThinking || thinkingDisplay) {
+                requestBase.thinking = {
+                  type: 'adaptive',
+                  ...(thinkingDisplay ? { display: thinkingDisplay } : {}),
+                };
+              }
+              if (effort !== undefined && effort !== 'none') {
+                requestBase.output_config ??= {};
+                requestBase.output_config.effort =
+                  this.normalizeAnthropicOutputEffort(effort, model);
+              }
             }
-          }
+            break;
         }
       }
 
@@ -916,6 +1047,21 @@ export class AnthropicProvider implements ApiProvider {
         stream,
         credential,
         historyUserId,
+        requestState,
+      });
+
+      Object.assign(requestBase, this.config.extraBody, model.extraBody);
+      requestBase = this.finalizeRequestBase(requestBase, {
+        model,
+        stream,
+        credential,
+        historyUserId,
+        requestState,
+      });
+
+      const headers = this.buildHeaders(credential, model, {
+        stream,
+        messages: sanitizedMessages,
         requestState,
       });
 
@@ -947,13 +1093,14 @@ export class AnthropicProvider implements ApiProvider {
           sdkStream,
           responseTimeoutMs,
           abortController.signal,
+          (error) => abortController.abort(error),
         );
 
         yield* this.parseMessageStream(
           timedStream,
           token,
           logger,
-          performanceTrace,
+          requestTrace,
           fineGrainedToolStreamingEnabled,
           requestState,
           expectedIdentity,
@@ -971,7 +1118,7 @@ export class AnthropicProvider implements ApiProvider {
         );
         yield* this.parseMessage(
           result,
-          performanceTrace,
+          requestTrace,
           logger,
           requestState,
           expectedIdentity,
@@ -997,8 +1144,7 @@ export class AnthropicProvider implements ApiProvider {
     const prefix =
       state.lastType !== undefined && state.lastType !== type ? '\n' : '';
     const output =
-      prefix +
-      (type === 'encrypted' ? ENCRYPTED_THINKING_PLACEHOLDER : text);
+      prefix + (type === 'encrypted' ? ENCRYPTED_THINKING_PLACEHOLDER : text);
 
     if (emitMode !== 'metadata-only') {
       yield new vscode.LanguageModelThinkingPart(output);
@@ -1020,11 +1166,12 @@ export class AnthropicProvider implements ApiProvider {
 
   private async *parseMessage(
     message: Anthropic.Beta.Messages.BetaMessage,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
     state: { userId?: string },
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     // NOTE: The current behavior of VSCode is such that all Parts returned here will be
     // aggregated into a single Part during the next request, and only the Thinking part
     // will be retained during the tool invocation round; most other types of Parts
@@ -1101,6 +1248,12 @@ export class AnthropicProvider implements ApiProvider {
       }
     }
 
+    if (message.usage) {
+      this.processUsage(message.usage, requestTrace, logger);
+    }
+
+    this.throwIfAbnormalStop(message);
+
     // Suppress purely empty responses (no content blocks) so callers see
     // no parts at all instead of an empty message. The outer service
     // treats Anthropic 0-part responses as valid and does not retry.
@@ -1113,21 +1266,18 @@ export class AnthropicProvider implements ApiProvider {
         },
       );
     }
-
-    if (message.usage) {
-      this.processUsage(message.usage, performanceTrace, logger);
-    }
   }
 
   private async *parseMessageStream(
     stream: AsyncIterable<BetaRawMessageStreamEvent>,
     token: vscode.CancellationToken,
     logger: RequestLogger,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     fineGrainedToolStreamingEnabled: boolean,
     state: { userId?: string },
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     let raw: BetaMessage | undefined;
 
     const recordFirstToken = createFirstTokenRecorder(performanceTrace);
@@ -1280,6 +1430,12 @@ export class AnthropicProvider implements ApiProvider {
             }
           }
 
+          if (raw?.usage) {
+            this.processUsage(raw.usage, requestTrace, logger);
+          }
+
+          this.throwIfAbnormalStop(raw);
+
           // Suppress purely empty responses (no content blocks). This
           // specifically handles Anthropic Messages streams where the
           // provider emits only `message_start` + `message_delta` (usage
@@ -1298,10 +1454,6 @@ export class AnthropicProvider implements ApiProvider {
               raw,
               userId: state.userId,
             });
-          }
-
-          if (raw?.usage) {
-            this.processUsage(raw.usage, performanceTrace, logger);
           }
           break;
         }
@@ -1342,6 +1494,38 @@ export class AnthropicProvider implements ApiProvider {
     if (token.isCancellationRequested) {
       return;
     }
+
+    // Streams that end without a `message_stop` event still carry the
+    // terminal stop reason from `message_delta`; surface abnormal ones.
+    this.throwIfAbnormalStop(raw);
+  }
+
+  /**
+   * Throw when the accumulated message ended with an abnormal stop reason
+   * (policy refusal or output truncation), so the user sees the actual
+   * cause instead of a silently empty/incomplete response. Unknown stop
+   * reasons from third-party providers are intentionally allowed through.
+   */
+  private throwIfAbnormalStop(raw: BetaMessage | undefined): void {
+    const stopReason = raw?.stop_reason;
+    if (!stopReason || !ANTHROPIC_ABNORMAL_STOP_REASONS.has(stopReason)) {
+      return;
+    }
+
+    const details: string[] = [];
+    if (raw?.stop_details) {
+      if (raw.stop_details.category) {
+        details.push(`category: ${raw.stop_details.category}`);
+      }
+      if (raw.stop_details.explanation) {
+        details.push(raw.stop_details.explanation);
+      }
+    }
+
+    throw new AbnormalStopReasonError(
+      stopReason,
+      details.length > 0 ? details.join(' - ') : undefined,
+    );
   }
 
   private accumulateMessage(
@@ -1484,6 +1668,9 @@ export class AnthropicProvider implements ApiProvider {
         snapshot.container = event.delta.container;
         snapshot.stop_reason = event.delta.stop_reason;
         snapshot.stop_sequence = event.delta.stop_sequence;
+        if (event.delta.stop_details != null) {
+          snapshot.stop_details = event.delta.stop_details;
+        }
         snapshot.usage.output_tokens = event.usage.output_tokens;
         snapshot.context_management = event.context_management;
 
@@ -1513,10 +1700,17 @@ export class AnthropicProvider implements ApiProvider {
 
   private processUsage(
     usage: BetaUsage,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
   ) {
-    sharedProcessUsage(usage.output_tokens, performanceTrace, logger, usage);
+    const normalizedUsage = createCopilotUsage(
+      (usage.input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0),
+      usage.output_tokens,
+      usage.cache_read_input_tokens,
+    );
+    sharedProcessUsage(requestTrace, logger, normalizedUsage);
   }
 
   estimateTokenCount(text: string): number {

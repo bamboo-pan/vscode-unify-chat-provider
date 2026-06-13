@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import { createSimpleHttpLogger } from '../../logger';
 import type { ProviderHttpLogger, RequestLogger } from '../../logger';
 import { ApiProvider } from '../interface';
-import { ModelConfig, PerformanceTrace, ProviderConfig } from '../../types';
+import { ChatRequestTrace, ModelConfig, ProviderConfig } from '../../types';
 import type { AuthTokenInfo } from '../../auth/types';
 import { Ollama } from 'ollama';
 import type {
@@ -29,6 +29,8 @@ import {
   isCacheControlMarker,
   isImageMarker,
   isInternalMarker,
+  isRawBaseUrlEnabled,
+  isUsageMarker,
   normalizeImageMimeType,
   resolveChatNetwork,
   sanitizeMessagesForModelSwitch,
@@ -38,9 +40,11 @@ import { getBaseModelId } from '../../model-id-utils';
 import { randomUUID } from 'crypto';
 import { ThinkingBlockMetadata } from '../types';
 import {
+  AbnormalStopReasonError,
   buildBaseUrl,
   createCustomFetch,
   createFirstTokenRecorder,
+  createCopilotUsage,
   estimateTokenCount as sharedEstimateTokenCount,
   getToken,
   getTokenType,
@@ -51,11 +55,25 @@ import {
 
 const TOOL_CALL_ID_PREFIX = 'ollama-tool:';
 
+/**
+ * Done reasons that indicate the response did not complete normally
+ * ('length' = truncated by the output token limit; 'load'/'unload' = the
+ * model was (un)loaded without generating). Unknown values pass through.
+ */
+const OLLAMA_ABNORMAL_DONE_REASONS: ReadonlySet<string> = new Set([
+  'length',
+  'load',
+  'unload',
+]);
+
 export class OllamaProvider implements ApiProvider {
   private readonly baseUrl: string;
 
   constructor(private readonly config: ProviderConfig) {
-    this.baseUrl = buildBaseUrl(config.baseUrl, { stripPattern: /\/api$/i });
+    this.baseUrl = buildBaseUrl(config.baseUrl, {
+      stripPattern: /\/api$/i,
+      useRawBaseUrl: isRawBaseUrlEnabled(config),
+    });
   }
 
   private buildHeaders(
@@ -91,6 +109,7 @@ export class OllamaProvider implements ApiProvider {
   ): Ollama {
     const chatNetwork =
       mode === 'chat' ? resolveChatNetwork(this.config) : undefined;
+    const proxy = chatNetwork?.proxy ?? resolveChatNetwork(this.config).proxy;
     const effectiveTimeout =
       chatNetwork?.timeout ?? DEFAULT_NORMAL_TIMEOUT_CONFIG;
 
@@ -101,6 +120,7 @@ export class OllamaProvider implements ApiProvider {
         responseTimeoutMs: effectiveTimeout.response,
         logger,
         retryConfig: chatNetwork?.retry,
+        proxy,
         type: mode,
         abortSignal,
       }),
@@ -112,11 +132,7 @@ export class OllamaProvider implements ApiProvider {
     image: Uint8Array | string,
   ): vscode.LanguageModelDataPart {
     if (typeof image === 'string') {
-      return createImageDataPartFromBase64(
-        image,
-        'image/png',
-        'image/png',
-      );
+      return createImageDataPartFromBase64(image, 'image/png', 'image/png');
     }
 
     return createImageDataPartFromBytes(image, 'image/png', 'image/png');
@@ -330,7 +346,7 @@ export class OllamaProvider implements ApiProvider {
       if (isCacheControlMarker(part)) {
         // ignore it, just use the officially recommended caching strategy.
         return undefined;
-      } else if (isInternalMarker(part)) {
+      } else if (isInternalMarker(part) || isUsageMarker(part)) {
         return undefined;
       } else if (isImageMarker(part)) {
         if (role === 'from_tool_result') {
@@ -403,8 +419,9 @@ export class OllamaProvider implements ApiProvider {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters:
-          normalizeToolInputSchema(tool.inputSchema) as Tool['function']['parameters'],
+        parameters: normalizeToolInputSchema(
+          tool.inputSchema,
+        ) as Tool['function']['parameters'],
       },
     }));
   }
@@ -469,11 +486,12 @@ export class OllamaProvider implements ApiProvider {
     model: ModelConfig,
     messages: readonly LanguageModelChatRequestMessage[],
     options: ProvideLanguageModelChatResponseOptions,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     token: CancellationToken,
     logger: RequestLogger,
     credential: AuthTokenInfo,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     const abortController = new AbortController();
     const headers = this.buildHeaders(credential, model);
     const streamEnabled = model.stream ?? true;
@@ -535,19 +553,24 @@ export class OllamaProvider implements ApiProvider {
           stream,
           responseTimeoutMs,
           abortController.signal,
+          (error) => {
+            abortController.abort(error);
+            stream?.abort();
+            client.abort();
+          },
         );
         yield* this.parseMessageStream(
           timedStream,
           token,
           logger,
-          performanceTrace,
+          requestTrace,
           expectedIdentity,
         );
       } else {
         const result = await client.chat({ ...baseBody, stream: false });
         yield* this.parseMessage(
           result,
-          performanceTrace,
+          requestTrace,
           logger,
           expectedIdentity,
         );
@@ -559,10 +582,11 @@ export class OllamaProvider implements ApiProvider {
 
   private async *parseMessage(
     message: ChatResponse,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     // NOTE: The current behavior of VSCode is such that all Parts returned here will be
     // aggregated into a single Part during the next request, and only the Thinking part
     // will be retained during the tool invocation round; most other types of Parts
@@ -605,25 +629,33 @@ export class OllamaProvider implements ApiProvider {
       }
     }
 
-    yield encodeStatefulMarkerPart<Message>(expectedIdentity, raw);
-
     this.processUsage(
       {
         prompt_eval_count: message.prompt_eval_count,
         eval_count: message.eval_count,
       },
-      performanceTrace,
+      requestTrace,
       logger,
     );
+
+    if (
+      message.done_reason &&
+      OLLAMA_ABNORMAL_DONE_REASONS.has(message.done_reason)
+    ) {
+      throw new AbnormalStopReasonError(message.done_reason);
+    }
+
+    yield encodeStatefulMarkerPart<Message>(expectedIdentity, raw);
   }
 
   private async *parseMessageStream(
     stream: AsyncIterable<ChatResponse>,
     token: vscode.CancellationToken,
     logger: RequestLogger,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     let snapshot: Message | undefined;
     let usage:
       | {
@@ -660,6 +692,15 @@ export class OllamaProvider implements ApiProvider {
           prompt_eval_count: event.prompt_eval_count,
           eval_count: event.eval_count,
         };
+
+        if (
+          event.done_reason &&
+          OLLAMA_ABNORMAL_DONE_REASONS.has(event.done_reason)
+        ) {
+          // Record usage before surfacing the error so logs keep counts.
+          this.processUsage(usage, requestTrace, logger);
+          throw new AbnormalStopReasonError(event.done_reason);
+        }
       }
     }
 
@@ -693,7 +734,7 @@ export class OllamaProvider implements ApiProvider {
     }
 
     if (usage) {
-      this.processUsage(usage, performanceTrace, logger);
+      this.processUsage(usage, requestTrace, logger);
     }
   }
 
@@ -795,14 +836,14 @@ export class OllamaProvider implements ApiProvider {
 
   private processUsage(
     usage: { prompt_eval_count: number; eval_count: number },
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
   ) {
-    sharedProcessUsage(usage.eval_count, performanceTrace, logger, {
-      prompt_tokens: usage.prompt_eval_count ?? 0,
-      completion_tokens: usage.eval_count ?? 0,
-      total_tokens: (usage.prompt_eval_count ?? 0) + (usage.eval_count ?? 0),
-    });
+    const normalizedUsage = createCopilotUsage(
+      usage.prompt_eval_count,
+      usage.eval_count,
+    );
+    sharedProcessUsage(requestTrace, logger, normalizedUsage);
   }
 
   estimateTokenCount(text: string): number {

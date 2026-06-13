@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import {
+  BlockedReason,
   ContentUnion,
   FunctionCallingConfigMode,
   GoogleGenAI,
@@ -16,7 +17,7 @@ import {
 import { createSimpleHttpLogger } from '../../logger';
 import type { RequestLogger } from '../../logger';
 import { ApiProvider } from '../interface';
-import { ModelConfig, PerformanceTrace, ProviderConfig } from '../../types';
+import { ChatRequestTrace, ModelConfig, ProviderConfig } from '../../types';
 import type { AuthTokenInfo } from '../../auth/types';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ProviderHttpLogger } from '../../logger';
@@ -32,7 +33,10 @@ import {
   isCacheControlMarker,
   isImageMarker,
   isInternalMarker,
+  isRawBaseUrlEnabled,
+  isUsageMarker,
   normalizeImageMimeType,
+  normalizeRawBaseUrlInput,
   resolveChatNetwork,
   resolveGoogleSdkTimeoutMs,
   sanitizeMessagesForModelSwitch,
@@ -42,7 +46,9 @@ import {
 import { getBaseModelId } from '../../model-id-utils';
 import { ThinkingBlockMetadata } from '../types';
 import {
+  AbnormalStopReasonError,
   createFirstTokenRecorder,
+  createCopilotUsage,
   estimateTokenCount as sharedEstimateTokenCount,
   getToken,
   getUnifiedUserAgent,
@@ -56,6 +62,29 @@ import { randomUUID } from 'node:crypto';
 import { FeatureId } from '../definitions';
 
 const TOOL_CALL_ID_PREFIX = 'google-tool:';
+
+/**
+ * Finish reasons that indicate the response did not complete normally and
+ * should surface as an error. Kept as an explicit blocklist so unknown
+ * future values pass through.
+ */
+const GEMINI_ABNORMAL_FINISH_REASONS: ReadonlySet<string> = new Set([
+  'MAX_TOKENS',
+  'SAFETY',
+  'RECITATION',
+  'LANGUAGE',
+  'OTHER',
+  'BLOCKLIST',
+  'PROHIBITED_CONTENT',
+  'SPII',
+  'MALFORMED_FUNCTION_CALL',
+  'IMAGE_SAFETY',
+  'UNEXPECTED_TOOL_CALL',
+  'IMAGE_PROHIBITED_CONTENT',
+  'NO_IMAGE',
+  'IMAGE_RECITATION',
+  'IMAGE_OTHER',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -97,6 +126,12 @@ export class GoogleAIStudioProvider implements ApiProvider {
   protected readonly apiVersion: string;
 
   constructor(protected readonly config: ProviderConfig) {
+    if (isRawBaseUrlEnabled(config)) {
+      this.baseUrl = normalizeRawBaseUrlInput(config.baseUrl);
+      this.apiVersion = 'v1beta';
+      return;
+    }
+
     const normalized = new URL(this.config.baseUrl);
     normalized.search = '';
     normalized.hash = '';
@@ -456,7 +491,11 @@ export class GoogleAIStudioProvider implements ApiProvider {
     while (index < contents.length) {
       const content = contents[index];
 
-      if (content.role !== 'model' || !content.parts || content.parts.length === 0) {
+      if (
+        content.role !== 'model' ||
+        !content.parts ||
+        content.parts.length === 0
+      ) {
         if (content.role !== 'model') {
           lastModelContentWithNamedFunctionCalls = undefined;
         }
@@ -473,17 +512,17 @@ export class GoogleAIStudioProvider implements ApiProvider {
       );
 
       if (anonymousParts.length > 0) {
-        const targetContent =
-          hasNamedFunctionCalls
-            ? content
-            : lastModelContentWithNamedFunctionCalls;
+        const targetContent = hasNamedFunctionCalls
+          ? content
+          : lastModelContentWithNamedFunctionCalls;
 
         if (targetContent) {
           this.mergeAnonymousFunctionCallParts(targetContent, anonymousParts);
         }
 
         const remainingParts = content.parts.filter(
-          (part) => !(part.functionCall !== undefined && !part.functionCall.name),
+          (part) =>
+            !(part.functionCall !== undefined && !part.functionCall.name),
         );
 
         if (remainingParts.length > 0) {
@@ -494,9 +533,7 @@ export class GoogleAIStudioProvider implements ApiProvider {
         }
       }
 
-      if (
-        content.parts.some((part) => part.functionCall?.name !== undefined)
-      ) {
+      if (content.parts.some((part) => part.functionCall?.name !== undefined)) {
         lastModelContentWithNamedFunctionCalls = content;
       }
 
@@ -509,7 +546,11 @@ export class GoogleAIStudioProvider implements ApiProvider {
     anonymousParts: Part[],
   ): void {
     const targetParts = targetContent.parts;
-    if (!targetParts || targetParts.length === 0 || anonymousParts.length === 0) {
+    if (
+      !targetParts ||
+      targetParts.length === 0 ||
+      anonymousParts.length === 0
+    ) {
       return;
     }
 
@@ -520,9 +561,7 @@ export class GoogleAIStudioProvider implements ApiProvider {
           : undefined,
       )
       .filter(
-        (
-          candidate,
-        ): candidate is { index: number; id: string | undefined } =>
+        (candidate): candidate is { index: number; id: string | undefined } =>
           candidate !== undefined,
       );
 
@@ -539,7 +578,8 @@ export class GoogleAIStudioProvider implements ApiProvider {
       }
 
       let targetIndex = anonymousCall.id
-        ? candidates.find((candidate) => candidate.id === anonymousCall.id)?.index
+        ? candidates.find((candidate) => candidate.id === anonymousCall.id)
+            ?.index
         : undefined;
 
       if (targetIndex === undefined && candidates.length === 1) {
@@ -602,10 +642,7 @@ export class GoogleAIStudioProvider implements ApiProvider {
         this.hasOnlyFunctionResponseParts(previous) &&
         this.hasOnlyFunctionResponseParts(current)
       ) {
-        previous.parts = [
-          ...(previous.parts ?? []),
-          ...(current.parts ?? []),
-        ];
+        previous.parts = [...(previous.parts ?? []), ...(current.parts ?? [])];
         contents.splice(index, 1);
         continue;
       }
@@ -781,7 +818,11 @@ export class GoogleAIStudioProvider implements ApiProvider {
         ? { text: thinkingText, thought: true }
         : undefined;
     } else if (part instanceof vscode.LanguageModelDataPart) {
-      if (isCacheControlMarker(part) || isInternalMarker(part)) {
+      if (
+        isCacheControlMarker(part) ||
+        isInternalMarker(part) ||
+        isUsageMarker(part)
+      ) {
         return undefined;
       }
 
@@ -892,11 +933,12 @@ export class GoogleAIStudioProvider implements ApiProvider {
     model: ModelConfig,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     options: vscode.ProvideLanguageModelChatResponseOptions,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     token: vscode.CancellationToken,
     logger: RequestLogger,
     credential: AuthTokenInfo,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     const abortController = new AbortController();
     const cancellationListener = token.onCancellationRequested(() => {
       abortController.abort();
@@ -974,48 +1016,102 @@ export class GoogleAIStudioProvider implements ApiProvider {
       if (streamEnabled) {
         const responseTimeoutMs = chatNetwork.timeout.response;
 
-        const stream = await withGoogleFetchLogger(logger, async () => {
-          return client.models.generateContentStream({
-            model: getBaseModelId(model.id),
-            contents,
-            config: generateConfig,
-          });
-        }, { connectionTimeoutMs: requestTimeoutMs, retryConfig: chatNetwork.retry });
+        const stream = await withGoogleFetchLogger(
+          logger,
+          async () => {
+            return client.models.generateContentStream({
+              model: getBaseModelId(model.id),
+              contents,
+              config: generateConfig,
+            });
+          },
+          {
+            connectionTimeoutMs: requestTimeoutMs,
+            retryConfig: chatNetwork.retry,
+            proxy: chatNetwork.proxy,
+          },
+        );
 
         const timedStream = withIdleTimeout(
           stream,
           responseTimeoutMs,
           abortController.signal,
+          (error) => abortController.abort(error),
         );
 
         yield* this.parseMessageStream(
           timedStream,
           token,
           logger,
-          performanceTrace,
+          requestTrace,
           expectedIdentity,
         );
       } else {
-        const data = await withGoogleFetchLogger(logger, async () => {
-          return client.models.generateContent({
-            model: getBaseModelId(model.id),
-            contents,
-            config: generateConfig,
-          });
-        }, { connectionTimeoutMs: requestTimeoutMs, retryConfig: chatNetwork.retry });
-        yield* this.parseMessage(data, performanceTrace, logger, expectedIdentity);
+        const data = await withGoogleFetchLogger(
+          logger,
+          async () => {
+            return client.models.generateContent({
+              model: getBaseModelId(model.id),
+              contents,
+              config: generateConfig,
+            });
+          },
+          {
+            connectionTimeoutMs: requestTimeoutMs,
+            retryConfig: chatNetwork.retry,
+            proxy: chatNetwork.proxy,
+          },
+        );
+        yield* this.parseMessage(data, requestTrace, logger, expectedIdentity);
       }
     } finally {
       cancellationListener.dispose();
     }
   }
 
+  /**
+   * Detect abnormal terminal states (blocked prompt or abnormal finish
+   * reason) so they surface as errors instead of silently empty/truncated
+   * responses. Returns the error instead of throwing so callers can finish
+   * usage accounting first.
+   */
+  protected abnormalFinishError(
+    response: GenerateContentResponse,
+  ): AbnormalStopReasonError | undefined {
+    const promptFeedback = response.promptFeedback;
+    if (
+      promptFeedback?.blockReason &&
+      promptFeedback.blockReason !== BlockedReason.BLOCKED_REASON_UNSPECIFIED
+    ) {
+      const details = ['prompt blocked'];
+      if (promptFeedback.blockReasonMessage) {
+        details.push(promptFeedback.blockReasonMessage);
+      }
+      return new AbnormalStopReasonError(
+        promptFeedback.blockReason,
+        details.join(' - '),
+      );
+    }
+
+    const candidate = response.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    if (finishReason && GEMINI_ABNORMAL_FINISH_REASONS.has(finishReason)) {
+      return new AbnormalStopReasonError(
+        finishReason,
+        candidate?.finishMessage,
+      );
+    }
+
+    return undefined;
+  }
+
   protected async *parseMessage(
     message: GenerateContentResponse,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     logger.providerResponseChunk(JSON.stringify(message));
 
     performanceTrace.ttft =
@@ -1062,23 +1158,29 @@ export class GoogleAIStudioProvider implements ApiProvider {
       yield new vscode.LanguageModelThinkingPart('', undefined, metadata);
     }
 
+    if (message.usageMetadata) {
+      this.processUsage(message.usageMetadata, requestTrace, logger);
+    }
+
+    const abnormalError = this.abnormalFinishError(message);
+    if (abnormalError) {
+      throw abnormalError;
+    }
+
     yield encodeStatefulMarkerPart<Content[]>(
       expectedIdentity,
       contentForHistory ? [contentForHistory] : [],
     );
-
-    if (message.usageMetadata) {
-      this.processUsage(message.usageMetadata, performanceTrace, logger);
-    }
   }
 
   protected async *parseMessageStream(
     stream: AsyncIterable<GenerateContentResponse>,
     token: vscode.CancellationToken,
     logger: RequestLogger,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     expectedIdentity: string,
   ): AsyncGenerator<vscode.LanguageModelResponsePart2> {
+    const performanceTrace = requestTrace.performance;
     const recordFirstToken = createFirstTokenRecorder(performanceTrace);
 
     let _completeThinking = '';
@@ -1145,6 +1247,15 @@ export class GoogleAIStudioProvider implements ApiProvider {
           }
         }
       }
+
+      const abnormalError = this.abnormalFinishError(chunk);
+      if (abnormalError) {
+        // Record usage before surfacing the error so logs keep token counts.
+        if (lastUsage) {
+          this.processUsage(lastUsage, requestTrace, logger);
+        }
+        throw abnormalError;
+      }
     }
 
     // Check cancellation before post-loop processing
@@ -1160,35 +1271,40 @@ export class GoogleAIStudioProvider implements ApiProvider {
 
     // from gemini sdk
     if (outputContents.length > 0) {
-      yield encodeStatefulMarkerPart<Content[]>(expectedIdentity, outputContents);
-    } else {
       yield encodeStatefulMarkerPart<Content[]>(
         expectedIdentity,
-        [
-          {
-            role: 'model',
-            parts: [],
-          } as Content,
-        ],
+        outputContents,
       );
+    } else {
+      yield encodeStatefulMarkerPart<Content[]>(expectedIdentity, [
+        {
+          role: 'model',
+          parts: [],
+        } as Content,
+      ]);
     }
 
     if (lastUsage) {
-      this.processUsage(lastUsage, performanceTrace, logger);
+      this.processUsage(lastUsage, requestTrace, logger);
     }
   }
 
   private processUsage(
     usage: NonNullable<GenerateContentResponse['usageMetadata']>,
-    performanceTrace: PerformanceTrace,
+    requestTrace: ChatRequestTrace,
     logger: RequestLogger,
   ): void {
-    sharedProcessUsage(
-      usage.candidatesTokenCount,
-      performanceTrace,
-      logger,
-      usage,
+    const promptTokens = usage.promptTokenCount ?? 0;
+    const completionTokens =
+      typeof usage.totalTokenCount === 'number'
+        ? usage.totalTokenCount - promptTokens
+        : (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
+    const normalizedUsage = createCopilotUsage(
+      promptTokens,
+      completionTokens,
+      usage.cachedContentTokenCount,
     );
+    sharedProcessUsage(requestTrace, logger, normalizedUsage);
   }
 
   estimateTokenCount(text: string): number {
@@ -1203,17 +1319,22 @@ export class GoogleAIStudioProvider implements ApiProvider {
     });
     try {
       const client = this.createClient(undefined, false, credential, 'normal');
+      const network = resolveChatNetwork(this.config);
       const result: ModelConfig[] = [];
-      const pager = await withGoogleFetchLogger(logger, async () => {
-        return client.models.list({
-          config: {
-            httpOptions: {
-              headers: this.buildHeaders(credential),
-              extraBody: this.buildExtraBody(),
+      const pager = await withGoogleFetchLogger(
+        logger,
+        async () => {
+          return client.models.list({
+            config: {
+              httpOptions: {
+                headers: this.buildHeaders(credential),
+                extraBody: this.buildExtraBody(),
+              },
             },
-          },
-        });
-      });
+          });
+        },
+        { proxy: network.proxy },
+      );
       for await (const model of pager) {
         if (model.name) {
           result.push({ id: model.name });
@@ -1231,6 +1352,7 @@ type FetchLoggerContext = {
   logger: ProviderHttpLogger;
   connectionTimeoutMs?: number;
   retryConfig?: RetryConfig;
+  proxy?: ProviderConfig['proxy'];
 };
 
 const fetchLoggerContext = new AsyncLocalStorage<FetchLoggerContext>();
@@ -1316,6 +1438,7 @@ function ensureInstalled(): void {
           logger: ctx.logger,
           retryConfig: ctx.retryConfig,
           connectionTimeoutMs: ctx.connectionTimeoutMs,
+          proxy: ctx.proxy,
         })
       : await baseFetch(input, init);
 
@@ -1350,7 +1473,10 @@ function ensureInstalled(): void {
 async function withGoogleFetchLogger<T>(
   logger: ProviderHttpLogger,
   fn: () => Promise<T>,
-  options?: Pick<FetchLoggerContext, 'connectionTimeoutMs' | 'retryConfig'>,
+  options?: Pick<
+    FetchLoggerContext,
+    'connectionTimeoutMs' | 'retryConfig' | 'proxy'
+  >,
 ): Promise<T> {
   ensureInstalled();
   return fetchLoggerContext.run({ logger, ...options }, fn);

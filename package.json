@@ -2,7 +2,7 @@
   "name": "vscode-unify-chat-provider",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "6.9.2",
+  "version": "7.4.2",
   "categories": [
     "AI",
     "Chat"
@@ -14,6 +14,7 @@
     "copilot",
     "github-copilot",
     "language-model",
+    "language-models",
     "llm",
     "ucp",
     "oai",
@@ -178,22 +179,26 @@
       {
         "command": "unifyChatProvider.commitMessageGeneration.generate",
         "title": "%command.commitMessageGeneration.generate.title%",
-        "icon": "$(edit-sparkle)"
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "unifyChatProvider.commitMessageGeneration.generateAll",
+        "title": "%command.commitMessageGeneration.generateAll.title%",
+        "icon": "$(sparkle)"
       },
       {
         "command": "unifyChatProvider.commitMessageGeneration.generateStaged",
         "title": "%command.commitMessageGeneration.generateStaged.title%",
-        "icon": "$(edit-sparkle)"
+        "icon": "$(sparkle)"
       },
       {
         "command": "unifyChatProvider.commitMessageGeneration.generateWorkingTree",
         "title": "%command.commitMessageGeneration.generateWorkingTree.title%",
-        "icon": "$(edit-sparkle)"
+        "icon": "$(sparkle)"
       },
       {
         "command": "unifyChatProvider.commitMessageGeneration.changeModel",
-        "title": "%command.commitMessageGeneration.changeModel.title%",
-        "icon": "$(edit-sparkle)"
+        "title": "%command.commitMessageGeneration.changeModel.title%"
       }
     ],
     "configuration": {
@@ -209,19 +214,13 @@
           "type": "string",
           "scope": "application",
           "description": "%configuration.modelDisplayNameTemplate.description%",
-          "default": "{modelName}"
+          "default": "{modelName}{{ ({providerName})}}"
         },
         "unifyChatProvider.storeApiKeyInSettings": {
           "type": "boolean",
           "scope": "application",
           "description": "%configuration.storeApiKeyInSettings.description%",
           "default": false
-        },
-        "unifyChatProvider.fixes.fix001ContextIndicatorDisplay": {
-          "type": "boolean",
-          "scope": "application",
-          "description": "%configuration.fixes.fix001ContextIndicatorDisplay.description%",
-          "default": true
         },
         "unifyChatProvider.balanceRefreshIntervalMs": {
           "type": "integer",
@@ -242,6 +241,12 @@
           "scope": "application",
           "description": "%configuration.balanceStatusBarIcon.description%",
           "default": "$(credit-card)"
+        },
+        "unifyChatProvider.displayBalanceInConfiguration": {
+          "type": "boolean",
+          "scope": "application",
+          "description": "%configuration.displayBalanceInConfiguration.description%",
+          "default": false
         },
         "unifyChatProvider.balanceWarning.enabled": {
           "type": "boolean",
@@ -323,6 +328,53 @@
                   "type": "number",
                   "description": "%configuration.networkSettings.retry.jitterFactor.description%",
                   "default": 0.1
+                },
+                "statusCodes": {
+                  "type": "array",
+                  "description": "%configuration.networkSettings.retry.statusCodes.description%",
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            "proxy": {
+              "type": "object",
+              "description": "%configuration.networkSettings.proxy.description%",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "%configuration.proxy.type.description%",
+                  "enum": [
+                    "vscode",
+                    "direct",
+                    "custom"
+                  ],
+                  "default": "vscode",
+                  "enumDescriptions": [
+                    "%configuration.proxy.type.enumDescriptions.0%",
+                    "%configuration.proxy.type.enumDescriptions.1%",
+                    "%configuration.proxy.type.enumDescriptions.2%"
+                  ]
+                },
+                "url": {
+                  "type": "string",
+                  "description": "%configuration.proxy.url.description%"
+                },
+                "authorization": {
+                  "type": "string",
+                  "description": "%configuration.proxy.authorization.description%"
+                },
+                "strictSSL": {
+                  "type": "boolean",
+                  "description": "%configuration.proxy.strictSSL.description%"
+                },
+                "noProxy": {
+                  "type": "array",
+                  "description": "%configuration.proxy.noProxy.description%",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -419,6 +471,7 @@
                   "openai-chat-completion",
                   "openai-responses",
                   "openai-codex",
+                  "xai-grok-build",
                   "ollama",
                   "claude-code"
                 ],
@@ -432,6 +485,7 @@
                   "%configuration.endpoints.type.enumDescriptions.3%",
                   "%configuration.endpoints.type.enumDescriptions.4%",
                   "%configuration.endpoints.type.enumDescriptions.7%",
+                  "%configuration.endpoints.type.enumDescriptions.11%",
                   "%configuration.endpoints.type.enumDescriptions.5%",
                   "%configuration.endpoints.type.enumDescriptions.9%"
                 ]
@@ -443,6 +497,11 @@
               "baseUrl": {
                 "type": "string",
                 "description": "%configuration.endpoints.baseUrl.description%"
+              },
+              "useRawBaseUrl": {
+                "type": "boolean",
+                "description": "%configuration.endpoints.useRawBaseUrl.description%",
+                "default": false
               },
               "balanceProvider": {
                 "type": "object",
@@ -618,6 +677,36 @@
                       "systemToken": {
                         "type": "string",
                         "description": "%configuration.endpoints.balanceProvider.newapi.systemToken.description%"
+                      },
+                      "quotaTransform": {
+                        "type": "object",
+                        "description": "%configuration.endpoints.balanceProvider.newapi.quotaTransform.description%",
+                        "properties": {
+                          "quotaField": {
+                            "type": "string",
+                            "description": "%configuration.endpoints.balanceProvider.newapi.quotaTransform.quotaField.description%",
+                            "default": "quota"
+                          },
+                          "extraQuotaFields": {
+                            "type": "array",
+                            "description": "%configuration.endpoints.balanceProvider.newapi.quotaTransform.extraQuotaFields.description%",
+                            "items": {
+                              "type": "string"
+                            },
+                            "default": []
+                          },
+                          "divisor": {
+                            "type": "number",
+                            "description": "%configuration.endpoints.balanceProvider.newapi.quotaTransform.divisor.description%",
+                            "default": 500000
+                          },
+                          "multiplier": {
+                            "type": "number",
+                            "description": "%configuration.endpoints.balanceProvider.newapi.quotaTransform.multiplier.description%",
+                            "default": 1
+                          }
+                        },
+                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -745,6 +834,46 @@
                     "type": "number",
                     "description": "%configuration.endpoints.retry.jitterFactor.description%",
                     "default": 0.1
+                  }
+                }
+              },
+              "proxy": {
+                "type": "object",
+                "description": "%configuration.endpoints.proxy.description%",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "description": "%configuration.proxy.type.description%",
+                    "enum": [
+                      "vscode",
+                      "direct",
+                      "custom"
+                    ],
+                    "default": "vscode",
+                    "enumDescriptions": [
+                      "%configuration.proxy.type.enumDescriptions.0%",
+                      "%configuration.proxy.type.enumDescriptions.1%",
+                      "%configuration.proxy.type.enumDescriptions.2%"
+                    ]
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "%configuration.proxy.url.description%"
+                  },
+                  "authorization": {
+                    "type": "string",
+                    "description": "%configuration.proxy.authorization.description%"
+                  },
+                  "strictSSL": {
+                    "type": "boolean",
+                    "description": "%configuration.proxy.strictSSL.description%"
+                  },
+                  "noProxy": {
+                    "type": "array",
+                    "description": "%configuration.proxy.noProxy.description%",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 }
               },
@@ -1447,23 +1576,10 @@
       }
     },
     "menus": {
-      "scm/title": [
+      "scm/inputBox": [
         {
           "command": "unifyChatProvider.commitMessageGeneration.generate",
-          "group": "navigation@-4",
           "when": "config.git.enabled && scmProvider == git && unifyChatProvider.gitAvailable && unifyChatProvider.commitMessageGenerationButtonsEnabled"
-        }
-      ],
-      "scm/resourceGroup/context": [
-        {
-          "command": "unifyChatProvider.commitMessageGeneration.generateStaged",
-          "group": "inline@-3",
-          "when": "config.git.enabled && scmProvider == git && scmResourceGroup == index && unifyChatProvider.gitAvailable && unifyChatProvider.commitMessageGenerationButtonsEnabled"
-        },
-        {
-          "command": "unifyChatProvider.commitMessageGeneration.generateWorkingTree",
-          "group": "inline@-3",
-          "when": "config.git.enabled && scmProvider == git && scmResourceGroup == workingTree && unifyChatProvider.gitAvailable && unifyChatProvider.commitMessageGenerationButtonsEnabled"
         }
       ]
     }
@@ -1486,16 +1602,17 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.90.0",
-    "@google/genai": "^1.50.1",
+    "@anthropic-ai/sdk": "^0.102.0",
+    "@google/genai": "^2.8.0",
     "@huggingface/tokenizers": "^0.1.3",
     "@iarna/toml": "^2.2.5",
     "@vscode/l10n": "^0.0.18",
     "minimatch": "^10.2.5",
     "ollama": "^0.6.3",
-    "openai": "^6.34.0",
+    "openai": "^6.42.0",
+    "socks": "^2.8.9",
     "tiktoken": "^1.0.22",
     "undici": "^7.22.0",
-    "ws": "^8.20.0"
+    "ws": "^8.21.0"
   }
 }

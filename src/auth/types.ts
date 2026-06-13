@@ -8,6 +8,7 @@ export type AuthMethod =
   | 'google-vertex-ai-auth'
   | 'claude-code'
   | 'openai-codex'
+  | 'xai-grok-oauth'
   | 'github-copilot';
 
 export type AuthTokenInfo =
@@ -152,6 +153,8 @@ export interface GeminiCliOAuthConfig {
   token?: string;
   /** Optional user-provided project id (duetProject). Used as fallback when managedProjectId is unavailable. */
   projectId?: string;
+  /** Gemini OAuth account type. Defaults to Code Assist. */
+  oauthType?: 'code_assist' | 'ai_studio' | 'google_one';
   /** Cloud Code Assist managed project id (cloudaicompanionProject) */
   managedProjectId?: string;
   tier?: 'free' | 'paid';
@@ -173,6 +176,15 @@ export interface OpenAICodexAuthConfig {
 
 export interface ClaudeCodeAuthConfig {
   method: 'claude-code';
+  label?: string;
+  description?: string;
+  identityId?: string;
+  token?: string;
+  email?: string;
+}
+
+export interface XaiGrokOAuthConfig {
+  method: 'xai-grok-oauth';
   label?: string;
   description?: string;
   identityId?: string;
@@ -223,8 +235,7 @@ export interface GoogleVertexAIAdcConfig extends GoogleVertexAIAuthBaseConfig {
 /**
  * Service Account JSON key file configuration
  */
-export interface GoogleVertexAIServiceAccountConfig
-  extends GoogleVertexAIAuthBaseConfig {
+export interface GoogleVertexAIServiceAccountConfig extends GoogleVertexAIAuthBaseConfig {
   subType: 'service-account';
   /** Path to service account JSON key file */
   keyFilePath: string;
@@ -237,8 +248,7 @@ export interface GoogleVertexAIServiceAccountConfig
 /**
  * API Key configuration (for Vertex AI Express Mode)
  */
-export interface GoogleVertexAIApiKeyConfig
-  extends GoogleVertexAIAuthBaseConfig {
+export interface GoogleVertexAIApiKeyConfig extends GoogleVertexAIAuthBaseConfig {
   subType: 'api-key';
   /** API key value or secret reference */
   apiKey?: string;
@@ -260,6 +270,7 @@ export type AuthConfig =
   | GeminiCliOAuthConfig
   | OpenAICodexAuthConfig
   | ClaudeCodeAuthConfig
+  | XaiGrokOAuthConfig
   | GitHubCopilotAuthConfig
   | GoogleVertexAIAuthConfig;
 
