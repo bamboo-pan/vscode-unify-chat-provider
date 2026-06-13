@@ -1,5 +1,7 @@
 .vscode/**
 .claude/**
+.github/**
+.tmp-code-user/**
 src/**
 test/**
 out-tests/**
